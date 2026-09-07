@@ -2,7 +2,6 @@ const express = require('express');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Watchlist Definition (Commodities, Crypto, Equities)
 const BASE_SYMBOLS = [
   { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil' },
   { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold' },
@@ -34,10 +33,10 @@ const RATIO_PAIRS = [
   { t1: 'IREN', t2: 'WULF' }
 ];
 
-let CACHED_PAYLOAD = [];
+let CACHED_DATA = [];
 let LAST_UPDATE = 0;
 
-async function fetchTickerData(symbol) {
+async function fetchTicker(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=false`;
   const res = await fetch(url, {
     headers: {
@@ -58,12 +57,14 @@ async function fetchTickerData(symbol) {
     }
   }
 
-  // Determine boundary for the active trading day
   const curPrice = meta.regularMarketPrice || (history.length ? history[history.length - 1].c : 0);
-  const prevClose = meta.chartPreviousClose || meta.previousClose || (history.length ? history[0].c : 1);
+  
+  // Explicitly separate daily close (yesterday) from 5-day close (start of chart)
+  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
+  const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
   const sessionStart = meta.currentTradingPeriod?.regular?.start || (history.length ? history[history.length - 1].t - 23400 : 0);
 
-  return { symbol, price: curPrice, prevClose, sessionStart, history };
+  return { symbol, price: curPrice, dailyPrevClose, weeklyPrevClose, sessionStart, history };
 }
 
 async function syncAll() {
@@ -71,7 +72,7 @@ async function syncAll() {
   await Promise.allSettled(
     BASE_SYMBOLS.map(async (item) => {
       try {
-        map[item.sym] = await fetchTickerData(item.sym);
+        map[item.sym] = await fetchTicker(item.sym);
       } catch (e) {
         console.error(`Error loading ${item.sym}:`, e.message);
       }
@@ -80,16 +81,15 @@ async function syncAll() {
 
   const results = [];
 
-  // 1. Process Individual Symbols
+  // 1. Process Singles
   for (const item of BASE_SYMBOLS) {
     const d = map[item.sym];
     if (!d || !d.history.length) continue;
 
     const curPrice = d.price;
-    const prevClose = d.prevClose;
-    const dailyChangePct = ((curPrice - prevClose) / prevClose) * 100;
+    const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
+    const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
-    // 1D candles: filter for today's regular session or last 78 candles (~6.5h)
     const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
 
@@ -98,14 +98,16 @@ async function syncAll() {
       name: item.name,
       sub: item.sub,
       price: curPrice,
-      prevClose,
+      dailyPrevClose: d.dailyPrevClose,
+      weeklyPrevClose: d.weeklyPrevClose,
       dailyChangePct,
+      weeklyChangePct,
       daySeries: dayHistory,
       weekSeries: d.history
     });
   }
 
-  // 2. Process Ratio Spreads
+  // 2. Process Ratios
   for (const pair of RATIO_PAIRS) {
     const d1 = map[pair.t1];
     const d2 = map[pair.t2];
@@ -119,8 +121,11 @@ async function syncAll() {
     if (!matched.length) continue;
 
     const curRatio = matched[matched.length - 1].c;
-    const prevRatio = d1.prevClose / d2.prevClose;
-    const dailyChangePct = ((curRatio - prevRatio) / prevRatio) * 100;
+    const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
+    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+
+    const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
+    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
 
     const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
     const dayTicks = matched.filter(m => m.t >= (sessionStart - 300));
@@ -132,25 +137,27 @@ async function syncAll() {
       name: id,
       sub: 'Spread',
       price: curRatio,
-      prevClose: prevRatio,
+      dailyPrevClose: dailyPrevRatio,
+      weeklyPrevClose: weeklyPrevRatio,
       dailyChangePct,
+      weeklyChangePct,
       daySeries: dayHistory,
       weekSeries: matched
     });
   }
 
   if (results.length > 0) {
-    CACHED_PAYLOAD = results;
+    CACHED_DATA = results;
     LAST_UPDATE = Date.now();
   }
 }
 
-// Low-latency polling: updates background data every 4 seconds
+// Low-latency polling every 3.5 seconds
 syncAll();
-setInterval(syncAll, 4000);
+setInterval(syncAll, 3500);
 
 app.get('/api/data', (req, res) => {
-  res.json({ updated: LAST_UPDATE, items: CACHED_PAYLOAD });
+  res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -171,12 +178,12 @@ app.get('/', (req, res) => {
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-  <title>RatioWatch</title>
+  <title>RatioWatch Pro</title>
   <link rel="manifest" href="/manifest.json">
   <meta name="theme-color" content="#0a0b0e">
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace; }
-    body { background: #0a0b0e; color: #e4e7eb; padding: 12px 10px 50px; user-select: none; -webkit-tap-highlight-color: transparent; }
+    body { background: #0a0b0e; color: #e4e7eb; padding: 12px 8px 60px; user-select: none; -webkit-tap-highlight-color: transparent; }
 
     header { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 14px; border-bottom: 1px solid #1a1c23; }
     h1 { font-size: 1.15rem; font-weight: 800; letter-spacing: 0.5px; }
@@ -186,10 +193,10 @@ app.get('/', (req, res) => {
     .watchlist { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
     
     .card {
-      background: #12141a;
+      background: #111319;
       border: 1px solid #1c202a;
       border-radius: 8px;
-      padding: 10px 12px;
+      padding: 10px 10px 12px;
       transition: background 0.3s ease, border-color 0.3s ease;
     }
     .card.dragging { opacity: 0.4; border: 1px dashed #00c805; }
@@ -200,84 +207,97 @@ app.get('/', (req, res) => {
       align-items: center;
       margin-bottom: 8px;
     }
-    .left-info { display: flex; align-items: center; gap: 8px; }
-    .drag-handle { color: #5a6078; cursor: grab; font-size: 1.1rem; padding: 0 4px; }
-    .reorder-btns { display: flex; flex-direction: column; gap: 1px; }
-    .btn-arrow { background: #1a1e28; border: none; color: #7e87a2; font-size: 0.55rem; padding: 2px 5px; border-radius: 2px; cursor: pointer; }
-    .btn-arrow:active { background: #32384a; color: #fff; }
+    .left-info { display: flex; align-items: center; gap: 6px; }
+    .drag-handle { color: #5a6078; cursor: grab; font-size: 1rem; padding: 0 2px; }
+
+    .reorder-group { display: flex; gap: 2px; align-items: center; }
+    .btn-ctrl {
+      background: #191c26;
+      border: 1px solid #282d3d;
+      color: #9098b6;
+      font-size: 0.72rem;
+      padding: 3px 5px;
+      border-radius: 4px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .btn-ctrl:active { background: #00c805; color: #000; border-color: #00c805; }
 
     .sym { font-size: 0.95rem; font-weight: 800; color: #ffffff; }
-    .sub { font-size: 0.68rem; color: #707792; }
+    .sub { font-size: 0.65rem; color: #707792; }
 
-    .right-info { text-align: right; }
     .price-tag {
-      font-size: 1.05rem;
+      font-size: 1.1rem;
       font-weight: 800;
       padding: 2px 6px;
       border-radius: 4px;
       display: inline-block;
       transition: background-color 0.2s, color 0.2s;
     }
-    .badge {
-      font-size: 0.72rem;
-      font-weight: 800;
-      padding: 2px 6px;
-      border-radius: 4px;
-      margin-top: 2px;
-      display: inline-block;
-    }
 
-    /* Long-lasting 1.4s price update flash */
     @keyframes flashGreen {
-      0% { background: rgba(0, 200, 5, 0.75); color: #fff; box-shadow: 0 0 14px rgba(0, 200, 5, 0.8); }
-      40% { background: rgba(0, 200, 5, 0.35); }
+      0% { background: rgba(0, 230, 100, 0.85); color: #fff; box-shadow: 0 0 16px rgba(0, 230, 100, 0.9); }
+      40% { background: rgba(0, 230, 100, 0.4); }
       100% { background: transparent; color: inherit; box-shadow: none; }
     }
     @keyframes flashRed {
-      0% { background: rgba(255, 59, 48, 0.75); color: #fff; box-shadow: 0 0 14px rgba(255, 59, 48, 0.8); }
-      40% { background: rgba(255, 59, 48, 0.35); }
+      0% { background: rgba(255, 60, 60, 0.85); color: #fff; box-shadow: 0 0 16px rgba(255, 60, 60, 0.9); }
+      40% { background: rgba(255, 60, 60, 0.4); }
       100% { background: transparent; color: inherit; box-shadow: none; }
     }
     .flash-up { animation: flashGreen 1.4s ease-out; }
     .flash-down { animation: flashRed 1.4s ease-out; }
 
-    .up { color: #00c805; }
-    .down { color: #ff3b30; }
-    .up-bg { background: rgba(0, 200, 5, 0.16); color: #00c805; }
-    .down-bg { background: rgba(255, 59, 48, 0.16); color: #ff3b30; }
-
-    /* Dual Charts Section */
     .charts-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
       gap: 8px;
-      margin-top: 6px;
     }
     .chart-panel {
-      background: #0d0e13;
+      background: #0b0c10;
       border: 1px solid #171a22;
       border-radius: 6px;
-      padding: 6px 8px;
+      padding: 6px 6px 4px;
       position: relative;
     }
     .chart-hdr {
       display: flex;
       justify-content: space-between;
-      font-size: 0.65rem;
-      font-weight: 700;
-      color: #6a718c;
-      margin-bottom: 2px;
+      align-items: center;
+      margin-bottom: 4px;
     }
-    .scrub-readout { color: #00c805; font-weight: 700; }
-    .svg-wrap { width: 100%; height: 75px; position: relative; }
+    .chart-title-box { display: flex; align-items: center; gap: 6px; }
+    .chart-label { font-size: 0.65rem; font-weight: 800; color: #707792; text-transform: uppercase; }
+
+    .badge {
+      font-size: 0.68rem;
+      font-weight: 800;
+      padding: 1px 5px;
+      border-radius: 4px;
+      display: inline-block;
+    }
+    .up-bg { background: rgba(0, 200, 5, 0.16); color: #00c805; }
+    .down-bg { background: rgba(255, 59, 48, 0.16); color: #ff3b30; }
+
+    .scrub-readout {
+      font-size: 0.62rem;
+      color: #00c805;
+      font-weight: 700;
+      white-space: nowrap;
+      text-align: right;
+    }
+
+    .svg-wrap { width: 100%; height: 95px; position: relative; }
     svg { width: 100%; height: 100%; overflow: visible; display: block; }
 
-    .axis-label { font-size: 8px; fill: #4e556f; font-family: sans-serif; }
+    .axis-label { font-size: 8.5px; fill: #505770; font-family: sans-serif; font-weight: 600; }
     .grid-line { stroke: #191c26; stroke-width: 1; }
-    .base-line { stroke: #2d3345; stroke-dasharray: 2,2; stroke-width: 1; }
+    .base-line { stroke: #3a4156; stroke-dasharray: 2,2; stroke-width: 1; }
+    .day-divider { stroke: #202433; stroke-width: 1; stroke-dasharray: 2,2; }
     .chart-line { fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
     .chart-area { stroke: none; opacity: 0.12; }
-    
+    .day-dot { stroke: #0b0c10; stroke-width: 1; }
+
     .cursor-line { stroke: #ffffff; stroke-dasharray: 2,2; stroke-width: 1; opacity: 0.7; }
     .cursor-dot { fill: #ffffff; stroke: #000; stroke-width: 1.5; }
   </style>
@@ -286,7 +306,7 @@ app.get('/', (req, res) => {
 
   <header>
     <h1>RATIOS & STOCKS</h1>
-    <div class="status"><div class="dot"></div> LIVE (2s)</div>
+    <div class="status"><div class="dot"></div> LIVE (1.5s)</div>
   </header>
 
   <div class="watchlist" id="watchlist"></div>
@@ -306,10 +326,10 @@ app.get('/', (req, res) => {
 
     function renderChartSvg(containerId, series, baselineVal, isDay) {
       if (!series || series.length < 2) return '';
-      const w = 180, h = 75;
-      const padTop = 6, padBtm = 14, padLeft = 2, padRight = 32;
-      const ch = h - padTop - padBtm;
-      const cw = w - padLeft - padRight;
+      const w = 260, h = 95;
+      const padTop = 10, padBtm = 16, padLeft = 4, padRight = 42;
+      const ch = h - padTop - padBtm; // 69
+      const cw = w - padLeft - padRight; // 214
 
       const vals = series.map(s => s.c);
       const min = Math.min(...vals);
@@ -328,58 +348,80 @@ app.get('/', (req, res) => {
       const isPos = vals[vals.length - 1] >= (baselineVal || vals[0]);
       const theme = isPos ? '#00c805' : '#ff3b30';
 
-      // Baseline line
+      const midVal = (max + min) / 2;
+      const midY = padTop + ch / 2;
+
       let baseSvg = '';
       if (baselineVal && baselineVal >= min && baselineVal <= max) {
         const by = padTop + ch - ((baselineVal - min) / range) * ch;
         baseSvg = '<line class="base-line" x1="' + padLeft + '" y1="' + by.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + by.toFixed(1) + '" />';
       }
 
-      // X Labels
+      let dayMarkersSvg = '';
+      if (!isDay) {
+        let lastDay = '';
+        const dayEndPts = [];
+        pts.forEach((p, idx) => {
+          const dayStr = new Date(p.t * 1000).toLocaleDateString([], { weekday: 'short' });
+          if (lastDay && dayStr !== lastDay) {
+            dayMarkersSvg += '<line class="day-divider" x1="' + p.x + '" y1="' + padTop + '" x2="' + p.x + '" y2="' + (padTop + ch) + '" />';
+            dayEndPts.push(pts[idx - 1]);
+          }
+          lastDay = dayStr;
+        });
+        dayEndPts.push(pts[pts.length - 1]);
+        dayEndPts.forEach(dp => {
+          if (dp) dayMarkersSvg += '<circle class="day-dot" cx="' + dp.x + '" cy="' + dp.y + '" r="3" fill="' + theme + '" />';
+        });
+      }
+
+      const fmtY = v => v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
+
       const xStart = formatDate(series[0].t, isDay ? 'day' : 'week');
+      const xMid = formatDate(series[Math.floor(series.length / 2)].t, isDay ? 'day' : 'week');
       const xEnd = formatDate(series[series.length - 1].t, isDay ? 'day' : 'week');
 
-      // Y Labels (Formatted)
-      const fmtY = v => v >= 100 ? v.toFixed(1) : v >= 1 ? v.toFixed(2) : v.toFixed(3);
-
       return \`
-        <svg viewBox="0 0 \${w} \${h}" id="\${containerId}" data-points='\${JSON.stringify(pts)}' onpointermove="scrubChart(event, '\${containerId}')" onpointerleave="leaveChart('\${containerId}')">
+        <svg viewBox="0 0 \${w} \${h}" id="\${containerId}" data-points='\${JSON.stringify(pts)}' onpointermove="scrubChart(event, '\${containerId}', \${padLeft}, \${cw})" onpointerleave="leaveChart('\${containerId}')">
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop}" x2="\${padLeft + cw}" y2="\${padTop}" />
+          <line class="grid-line" x1="\${padLeft}" y1="\${midY.toFixed(1)}" x2="\${padLeft + cw}" y2="\${midY.toFixed(1)}" />
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop + ch}" x2="\${padLeft + cw}" y2="\${padTop + ch}" />
           \${baseSvg}
+          \${dayMarkersSvg}
 
           <text class="axis-label" x="\${w - 2}" y="\${padTop + 6}" text-anchor="end">\${fmtY(max)}</text>
+          <text class="axis-label" x="\${w - 2}" y="\${(midY + 3).toFixed(1)}" text-anchor="end">\${fmtY(midVal)}</text>
           <text class="axis-label" x="\${w - 2}" y="\${padTop + ch}" text-anchor="end">\${fmtY(min)}</text>
 
           <path class="chart-area" d="\${areaPath}" fill="\${theme}" />
           <path class="chart-line" d="\${strokePath}" stroke="\${theme}" />
 
-          <text class="axis-label" x="\${padLeft}" y="\${h - 2}">\${xStart}</text>
-          <text class="axis-label" x="\${padLeft + cw}" y="\${h - 2}" text-anchor="end">\${xEnd}</text>
+          <text class="axis-label" x="\${padLeft}" y="\${h - 4}">\${xStart}</text>
+          <text class="axis-label" x="\${padLeft + cw / 2}" y="\${h - 4}" text-anchor="middle">\${xMid}</text>
+          <text class="axis-label" x="\${padLeft + cw}" y="\${h - 4}" text-anchor="end">\${xEnd}</text>
 
           <g id="\${containerId}-cursor" style="display:none;">
             <line id="\${containerId}-vline" class="cursor-line" y1="\${padTop}" y2="\${padTop + ch}" />
-            <circle id="\${containerId}-dot" class="cursor-dot" r="3.5" />
+            <circle id="\${containerId}-dot" class="cursor-dot" r="4" />
           </g>
         </svg>
       \`;
     }
 
-    function scrubChart(e, id) {
+    // Precise 1:1 synchronization with zero drift
+    function scrubChart(e, id, padLeft, cw) {
       const svg = document.getElementById(id);
       if (!svg) return;
       const pts = JSON.parse(svg.getAttribute('data-points') || '[]');
       if (!pts.length) return;
 
       const rect = svg.getBoundingClientRect();
-      const clickX = ((e.clientX - rect.left) / rect.width) * 180;
-      
-      let closest = pts[0];
-      let minDiff = 9999;
-      for (const p of pts) {
-        const diff = Math.abs(p.x - clickX);
-        if (diff < minDiff) { minDiff = diff; closest = p; }
-      }
+      const svgX = ((e.clientX - rect.left) / rect.width) * 260;
+      const clampedX = Math.max(padLeft, Math.min(padLeft + cw, svgX));
+
+      const frac = (clampedX - padLeft) / cw;
+      const idx = Math.min(pts.length - 1, Math.max(0, Math.round(frac * (pts.length - 1))));
+      const closest = pts[idx];
 
       const cursor = document.getElementById(id + '-cursor');
       const vline = document.getElementById(id + '-vline');
@@ -396,7 +438,8 @@ app.get('/', (req, res) => {
       if (readout) {
         const d = new Date(closest.t * 1000);
         const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-        readout.textContent = timeStr + ' | ' + (closest.val >= 10 ? closest.val.toFixed(2) : closest.val.toFixed(4));
+        const valStr = closest.val >= 100 ? closest.val.toFixed(2) : closest.val >= 1 ? closest.val.toFixed(3) : closest.val.toFixed(4);
+        readout.textContent = timeStr + ' | ' + valStr;
       }
     }
 
@@ -421,41 +464,34 @@ app.get('/', (req, res) => {
       renderList();
     }
 
-    function initDragEvents() {
-      const cards = document.querySelectorAll('.card');
-      cards.forEach(card => {
-        card.addEventListener('dragstart', e => {
-          e.dataTransfer.setData('text/plain', card.getAttribute('data-id'));
-          card.classList.add('dragging');
-        });
-        card.addEventListener('dragend', () => card.classList.remove('dragging'));
-        card.addEventListener('dragover', e => e.preventDefault());
-        card.addEventListener('drop', e => {
-          e.preventDefault();
-          const draggedId = e.dataTransfer.getData('text/plain');
-          const targetId = card.getAttribute('data-id');
-          if (draggedId && targetId && draggedId !== targetId) {
-            const fromIdx = savedOrder.indexOf(draggedId);
-            const toIdx = savedOrder.indexOf(targetId);
-            savedOrder.splice(fromIdx, 1);
-            savedOrder.splice(toIdx, 0, draggedId);
-            localStorage.setItem('user_order', JSON.stringify(savedOrder));
-            renderList();
-          }
-        });
-      });
+    function sendToTop(id) {
+      const idx = savedOrder.indexOf(id);
+      if (idx > 0) {
+        savedOrder.splice(idx, 1);
+        savedOrder.unshift(id);
+        localStorage.setItem('user_order', JSON.stringify(savedOrder));
+        renderList();
+      }
+    }
+
+    function sendToBottom(id) {
+      const idx = savedOrder.indexOf(id);
+      if (idx !== -1 && idx < savedOrder.length - 1) {
+        savedOrder.splice(idx, 1);
+        savedOrder.push(id);
+        localStorage.setItem('user_order', JSON.stringify(savedOrder));
+        renderList();
+      }
     }
 
     function renderList() {
       const container = document.getElementById('watchlist');
       if (!Object.keys(latestData).length) return;
 
-      // Populate default order if empty
       if (!savedOrder.length) {
         savedOrder = Object.keys(latestData);
         localStorage.setItem('user_order', JSON.stringify(savedOrder));
       } else {
-        // Sync any new incoming items
         Object.keys(latestData).forEach(k => {
           if (!savedOrder.includes(k)) savedOrder.push(k);
         });
@@ -466,13 +502,17 @@ app.get('/', (req, res) => {
         const item = latestData[id];
         if (!item) return;
 
-        const isPos = item.dailyChangePct >= 0;
-        const badgeClass = isPos ? 'up-bg' : 'down-bg';
-        const sign = isPos ? '+' : '';
+        const dayPos = item.dailyChangePct >= 0;
+        const dayBadge = dayPos ? 'up-bg' : 'down-bg';
+        const daySign = dayPos ? '+' : '';
+
+        const weekPos = item.weeklyChangePct >= 0;
+        const weekBadge = weekPos ? 'up-bg' : 'down-bg';
+        const weekSign = weekPos ? '+' : '';
+
         const priceStr = item.price >= 1000 ? item.price.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
                          item.price >= 10 ? item.price.toFixed(2) : item.price.toFixed(4);
 
-        // Check if price changed to trigger 1.4s animation
         let flashClass = '';
         if (previousPrices[id] !== undefined && previousPrices[id] !== item.price) {
           flashClass = item.price > previousPrices[id] ? 'flash-up' : 'flash-down';
@@ -482,40 +522,47 @@ app.get('/', (req, res) => {
         const daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
         const weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
-        const daySvg = renderChartSvg(daySvgId, item.daySeries, item.prevClose, true);
-        const weekSvg = renderChartSvg(weekSvgId, item.weekSeries, item.weekSeries[0]?.c, false);
+        const daySvg = renderChartSvg(daySvgId, item.daySeries, item.dailyPrevClose, true);
+        const weekSvg = renderChartSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false);
 
         html += \`
           <div class="card" draggable="true" data-id="\${item.id}">
             <div class="top-bar">
               <div class="left-info">
                 <div class="drag-handle">⋮⋮</div>
-                <div class="reorder-btns">
-                  <button class="btn-arrow" onclick="reorderItem('\${item.id}', -1)">▲</button>
-                  <button class="btn-arrow" onclick="reorderItem('\${item.id}', 1)">▼</button>
+                <div class="reorder-group">
+                  <button class="btn-ctrl" onclick="sendToTop('\${item.id}')" title="Top">⤒</button>
+                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', -1)" title="Up">▲</button>
+                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', 1)" title="Down">▼</button>
+                  <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
                 </div>
                 <div>
                   <div class="sym">\${item.name}</div>
                   <div class="sub">\${item.sub}</div>
                 </div>
               </div>
-              <div class="right-info">
-                <div><span class="price-tag \${flashClass}">\${priceStr}</span></div>
-                <div class="badge \${badgeClass}">\${sign}\${item.dailyChangePct.toFixed(2)}%</div>
+              <div>
+                <span class="price-tag \${flashClass}">\${priceStr}</span>
               </div>
             </div>
 
             <div class="charts-grid">
               <div class="chart-panel">
                 <div class="chart-hdr">
-                  <span>1D INTRADAY</span>
+                  <div class="chart-title-box">
+                    <span class="chart-label">1D</span>
+                    <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
+                  </div>
                   <span id="\${daySvgId}-readout" class="scrub-readout"></span>
                 </div>
                 <div class="svg-wrap">\${daySvg}</div>
               </div>
               <div class="chart-panel">
                 <div class="chart-hdr">
-                  <span>1W TREND</span>
+                  <div class="chart-title-box">
+                    <span class="chart-label">1W</span>
+                    <span class="badge \${weekBadge}">\${weekSign}\${item.weeklyChangePct.toFixed(2)}%</span>
+                  </div>
                   <span id="\${weekSvgId}-readout" class="scrub-readout"></span>
                 </div>
                 <div class="svg-wrap">\${weekSvg}</div>
@@ -526,7 +573,6 @@ app.get('/', (req, res) => {
       });
 
       container.innerHTML = html;
-      initDragEvents();
     }
 
     async function poll() {
@@ -542,12 +588,11 @@ app.get('/', (req, res) => {
       }
     }
 
-    // Initial load + 2-second live refresh
     poll();
-    setInterval(poll, 2000);
+    setInterval(poll, 1500);
   </script>
 </body>
 </html>`);
 });
 
-app.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+app.listen(PORT, () => console.log(`Listening on ${PORT}`));
