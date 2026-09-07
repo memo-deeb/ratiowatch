@@ -61,7 +61,6 @@ async function fetchTicker(symbol) {
   const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
   const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
 
-  // Determine standard regular market hours (6.5 hours)
   const reg = meta.currentTradingPeriod?.regular;
   let sessionStart = reg?.start;
   let sessionEnd = reg?.end;
@@ -72,7 +71,7 @@ async function fetchTicker(symbol) {
     const sameDay = history.filter(h => new Date(h.t * 1000).toDateString() === lastDate);
     if (sameDay.length) {
       sessionStart = sameDay[0].t;
-      sessionEnd = sessionStart + 23400; // standard 6.5h session
+      sessionEnd = sessionStart + 23400;
     } else {
       sessionStart = lastTickT - 23400;
       sessionEnd = lastTickT;
@@ -96,7 +95,6 @@ async function syncAll() {
 
   const results = [];
 
-  // 1. Base Singles
   for (const item of BASE_SYMBOLS) {
     const d = map[item.sym];
     if (!d || !d.history.length) continue;
@@ -124,7 +122,6 @@ async function syncAll() {
     });
   }
 
-  // 2. Ratio Spreads
   for (const pair of RATIO_PAIRS) {
     const d1 = map[pair.t1];
     const d2 = map[pair.t2];
@@ -205,11 +202,11 @@ app.get('/', (req, res) => {
   <style>
     :root[data-theme="oled"] {
       --bg: #000000;
-      --card-bg: #0c0d11;
-      --card-border: #181b24;
+      --card-bg: #0b0c10;
+      --card-border: #161822;
       --chart-bg: #040507;
       --text: #f3f5f9;
-      --text-sub: #697188;
+      --text-sub: #6c738c;
       --axis: #525974;
       --grid: #151822;
       --base: #373e54;
@@ -219,17 +216,17 @@ app.get('/', (req, res) => {
       --flash-down: rgba(255, 60, 60, 0.85);
     }
     :root[data-theme="darkgray"] {
-      --bg: #131417;
-      --card-bg: #1c1d22;
-      --card-border: #292b33;
-      --chart-bg: #16171b;
+      --bg: #111216;
+      --card-bg: #18191f;
+      --card-border: #262832;
+      --chart-bg: #131418;
       --text: #f3f5f9;
       --text-sub: #828a9e;
       --axis: #6e768b;
-      --grid: #252730;
+      --grid: #22242c;
       --base: #42495d;
-      --btn-bg: #262830;
-      --btn-border: #353844;
+      --btn-bg: #22242c;
+      --btn-border: #313542;
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
     }
@@ -280,9 +277,9 @@ app.get('/', (req, res) => {
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-feature-settings: "tnum" 1; }
-    body { background: var(--bg); color: var(--text); padding: 10px 12px 60px; user-select: none; -webkit-tap-highlight-color: transparent; }
+    body { background: var(--bg); color: var(--text); padding: 8px 10px 60px; user-select: none; -webkit-tap-highlight-color: transparent; }
 
-    header { display: flex; justify-content: space-between; align-items: center; padding: 4px 6px 12px; border-bottom: 1px solid var(--card-border); gap: 8px; flex-wrap: wrap; }
+    header { display: flex; justify-content: space-between; align-items: center; padding: 4px 4px 10px; border-bottom: 1px solid var(--card-border); gap: 8px; flex-wrap: wrap; }
     .header-left { display: flex; align-items: baseline; gap: 8px; }
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
@@ -295,57 +292,65 @@ app.get('/', (req, res) => {
     }
     .action-btn.active { background: #00c805; color: #000; border-color: #00c805; }
 
-    /* Layout Containers */
-    .watchlist { margin-top: 10px; }
+    .watchlist { margin-top: 8px; }
     .watchlist.card-view {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
       gap: 10px;
     }
     .watchlist.list-view {
       display: flex;
       flex-direction: column;
-      gap: 6px;
+      gap: 8px;
     }
 
     .card {
       background: var(--card-bg);
       border: 1px solid var(--card-border);
       border-radius: 8px;
-      padding: 10px 12px;
+      padding: 8px 10px 10px;
       transition: background 0.2s, border-color 0.2s;
     }
     .card.dragging { opacity: 0.35; border: 1px dashed #00c805; }
 
-    .main-row {
-      display: grid;
-      grid-template-columns: minmax(130px, 155px) 1fr;
+    /* Single Consolidated Header Bar */
+    .card-topbar {
+      display: flex;
+      justify-content: space-between;
       align-items: center;
-      gap: 12px;
+      gap: 8px;
+      margin-bottom: 6px;
+      flex-wrap: nowrap;
+    }
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      min-width: 0;
+      flex-shrink: 1;
+    }
+    .topbar-right {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
     }
 
-    .meta-block { display: flex; flex-direction: column; gap: 3px; }
-    .top-meta { display: flex; align-items: center; gap: 5px; }
-    .drag-handle { color: var(--text-sub); cursor: grab; font-size: 1rem; line-height: 1; }
+    .drag-handle { color: var(--text-sub); cursor: grab; font-size: 0.95rem; line-height: 1; }
     .reorder-btns { display: flex; gap: 2px; }
     .btn-ctrl {
       background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text-sub);
       font-size: 0.65rem; padding: 2px 4px; border-radius: 3px; cursor: pointer; line-height: 1;
     }
     .btn-ctrl:active { background: #00c805; color: #000; }
-    .sym { font-size: 0.95rem; font-weight: 800; white-space: nowrap; }
 
-    .price-group {
-      display: flex;
-      align-items: baseline;
-      gap: 6px;
-      margin-top: 2px;
-    }
+    .sym { font-size: 0.95rem; font-weight: 800; white-space: nowrap; }
     .price-val {
-      font-size: 1.15rem;
+      font-size: 1.12rem;
       font-weight: 800;
       padding: 1px 4px;
       border-radius: 4px;
+      white-space: nowrap;
       display: inline-block;
     }
     .badge {
@@ -353,23 +358,36 @@ app.get('/', (req, res) => {
       font-weight: 800;
       padding: 2px 6px;
       border-radius: 4px;
+      white-space: nowrap;
     }
+    .sub {
+      font-size: 0.68rem;
+      color: var(--text-sub);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 130px;
+      font-weight: 500;
+    }
+
     .up-bg { background: rgba(0, 200, 5, 0.16); color: #00c805; }
     .down-bg { background: rgba(255, 59, 48, 0.16); color: #ff3b30; }
 
-    .sub-meta {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-top: 2px;
+    .scrub-readout {
+      font-size: 0.72rem;
+      color: #00c805;
+      font-weight: 800;
+      white-space: nowrap;
+      min-width: 70px;
+      text-align: right;
     }
-    .sub { font-size: 0.68rem; color: var(--text-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 105px; font-weight: 500; }
     .week-pill {
       background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text-sub);
-      font-size: 0.65rem; font-weight: 800; padding: 1px 6px; border-radius: 4px; cursor: pointer;
+      font-size: 0.65rem; font-weight: 800; padding: 2px 6px; border-radius: 4px; cursor: pointer;
     }
     .week-pill.active { background: #00c805; color: #000; border-color: #00c805; }
 
+    /* Flash Animations */
     @keyframes flashGreen {
       0% { background: var(--flash-up); color: #fff; box-shadow: 0 0 16px var(--flash-up); }
       40% { background: rgba(0, 230, 100, 0.35); }
@@ -383,27 +401,19 @@ app.get('/', (req, res) => {
     .flash-up { animation: flashGreen 1.4s ease-out; }
     .flash-down { animation: flashRed 1.4s ease-out; }
 
-    /* Expanded Chart Canvas */
+    /* Full-Width Chart Canvas */
     .chart-box {
+      width: 100%;
       background: var(--chart-bg);
       border: 1px solid var(--card-border);
       border-radius: 6px;
       padding: 6px 8px;
       position: relative;
     }
-    .chart-hdr {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 2px;
-    }
-    .chart-label { font-size: 0.68rem; font-weight: 800; color: var(--text-sub); }
-    .scrub-readout { font-size: 0.72rem; color: #00c805; font-weight: 800; text-align: right; }
-
-    .svg-wrap { width: 100%; height: 115px; position: relative; }
+    .svg-wrap { width: 100%; height: 130px; position: relative; }
     svg { width: 100%; height: 100%; overflow: visible; display: block; }
 
-    .axis-label { font-size: 10px; fill: var(--axis); font-weight: 700; }
+    .axis-label { font-size: 10.5px; fill: var(--axis); font-weight: 700; }
     .grid-line { stroke: var(--grid); stroke-width: 1; }
     .base-line { stroke: var(--base); stroke-dasharray: 3,3; stroke-width: 1.2; }
     .day-divider { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2,2; }
@@ -411,7 +421,6 @@ app.get('/', (req, res) => {
     .chart-area { stroke: none; opacity: 0.12; }
     .day-dot { stroke: var(--chart-bg); stroke-width: 1.2; }
 
-    /* Glowing Live Price Beacon */
     .live-dot-outer {
       animation: pulseBeacon 2s infinite ease-in-out;
       transform-origin: center;
@@ -425,13 +434,21 @@ app.get('/', (req, res) => {
     .cursor-line { stroke: var(--text); stroke-dasharray: 2,2; stroke-width: 1; opacity: 0.7; }
     .cursor-dot { fill: var(--text); stroke: var(--bg); stroke-width: 2; }
 
+    /* Collapsible Weekly Drawer */
     .week-drawer {
       display: none;
-      margin-top: 10px;
+      margin-top: 8px;
       padding-top: 8px;
       border-top: 1px solid var(--card-border);
     }
     .week-drawer.open { display: block; }
+    .week-drawer-hdr {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 4px;
+      font-size: 0.72rem;
+    }
   </style>
 </head>
 <body>
@@ -463,7 +480,6 @@ app.get('/', (req, res) => {
     let openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     let allWeekOpen = false;
 
-    // View Mode Initialization
     let currentView = localStorage.getItem('rw_view') || 'card';
     applyViewMode(currentView);
 
@@ -485,7 +501,6 @@ app.get('/', (req, res) => {
       applyViewMode(currentView === 'card' ? 'list' : 'card');
     }
 
-    // Theme Initialization
     const currentTheme = localStorage.getItem('rw_theme') || 'darkgray';
     document.documentElement.setAttribute('data-theme', currentTheme);
     document.getElementById('themeSelect').value = currentTheme;
@@ -505,17 +520,16 @@ app.get('/', (req, res) => {
 
     function buildSvg(id, series, baselineVal, isDay, sStart, sEnd) {
       if (!series || series.length < 2) return '';
-      const w = 360, h = 115;
-      const padTop = 10, padBtm = 18, padLeft = 6, padRight = 50;
-      const ch = h - padTop - padBtm; // 87
-      const cw = w - padLeft - padRight; // 304
+      const w = 440, h = 130;
+      const padTop = 10, padBtm = 20, padLeft = 6, padRight = 55;
+      const ch = h - padTop - padBtm; // 100
+      const cw = w - padLeft - padRight; // 379
 
       const vals = series.map(s => s.c);
       const min = Math.min(...vals);
       const max = Math.max(...vals);
       const range = max === min ? 1 : max - min;
 
-      // In 1D mode, X-axis spans the full trading session bounds
       let sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
 
       const pts = series.map((s, i) => {
@@ -563,7 +577,6 @@ app.get('/', (req, res) => {
         });
       }
 
-      // Glowing current price beacon point
       const lastPt = pts[pts.length - 1];
       const liveDotSvg = \`
         <g>
@@ -596,20 +609,20 @@ app.get('/', (req, res) => {
           \${dayMarkersSvg}
 
           <text class="axis-label" x="\${w - 2}" y="\${padTop + 8}" text-anchor="end">\${fmtY(max)}</text>
-          <text class="axis-label" x="\${w - 2}" y="\${(midY + 3).toFixed(1)}" text-anchor="end">\${fmtY(midVal)}</text>
+          <text class="axis-label" x="\${w - 2}" y="\${(midY + 4).toFixed(1)}" text-anchor="end">\${fmtY(midVal)}</text>
           <text class="axis-label" x="\${w - 2}" y="\${padTop + ch}" text-anchor="end">\${fmtY(min)}</text>
 
           <path class="chart-area" d="\${areaPath}" fill="\${themeColor}" />
           <path class="chart-line" d="\${strokePath}" stroke="\${themeColor}" />
           \${liveDotSvg}
 
-          <text class="axis-label" x="\${padLeft}" y="\${h - 3}">\${xStart}</text>
-          <text class="axis-label" x="\${padLeft + cw / 2}" y="\${h - 3}" text-anchor="middle">\${xMid}</text>
-          <text class="axis-label" x="\${padLeft + cw}" y="\${h - 3}" text-anchor="end">\${xEnd}</text>
+          <text class="axis-label" x="\${padLeft}" y="\${h - 4}">\${xStart}</text>
+          <text class="axis-label" x="\${padLeft + cw / 2}" y="\${h - 4}" text-anchor="middle">\${xMid}</text>
+          <text class="axis-label" x="\${padLeft + cw}" y="\${h - 4}" text-anchor="end">\${xEnd}</text>
 
           <g id="\${id}-cursor" style="display:none;">
             <line id="\${id}-vline" class="cursor-line" y1="\${padTop}" y2="\${padTop + ch}" />
-            <circle id="\${id}-dot" class="cursor-dot" r="4" />
+            <circle id="\${id}-dot" class="cursor-dot" r="4.5" />
           </g>
         </svg>
       \`;
@@ -752,48 +765,39 @@ app.get('/', (req, res) => {
 
         html += \`
           <div class="card" draggable="true" data-id="\${item.id}">
-            <div class="main-row">
-              <div class="meta-block">
-                <div class="top-meta">
-                  <div class="drag-handle">⋮⋮</div>
-                  <div class="reorder-btns">
-                    <button class="btn-ctrl" onclick="sendToTop('\${item.id}')" title="Top">⤒</button>
-                    <button class="btn-ctrl" onclick="reorderItem('\${item.id}', -1)" title="Up">▲</button>
-                    <button class="btn-ctrl" onclick="reorderItem('\${item.id}', 1)" title="Down">▼</button>
-                    <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
-                  </div>
-                  <div class="sym">\${item.name}</div>
+            <div class="card-topbar">
+              <div class="topbar-left">
+                <span class="drag-handle">⋮⋮</span>
+                <div class="reorder-btns">
+                  <button class="btn-ctrl" onclick="sendToTop('\${item.id}')" title="Top">⤒</button>
+                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', -1)" title="Up">▲</button>
+                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', 1)" title="Down">▼</button>
+                  <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
                 </div>
-
-                <div class="price-group">
-                  <span class="price-val \${flashClass}">\${priceStr}</span>
-                  <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
-                </div>
-
-                <div class="sub-meta">
-                  <div class="sub">\${item.sub}</div>
-                  <button class="week-pill \${isWeekOpen ? 'active' : ''}" onclick="toggleWeek('\${item.id}')">1W</button>
-                </div>
+                <span class="sym">\${item.name}</span>
+                <span class="price-val \${flashClass}">\${priceStr}</span>
+                <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
+                <span class="sub">\${item.sub}</span>
               </div>
-
-              <div class="chart-box">
-                <div class="chart-hdr">
-                  <span class="chart-label">1D INTRADAY</span>
-                  <span id="\${daySvgId}-readout" class="scrub-readout"></span>
-                </div>
-                <div class="svg-wrap">\${daySvg}</div>
+              <div class="topbar-right">
+                <span id="\${daySvgId}-readout" class="scrub-readout"></span>
+                <button class="week-pill \${isWeekOpen ? 'active' : ''}" onclick="toggleWeek('\${item.id}')">1W</button>
               </div>
             </div>
 
+            <div class="chart-box">
+              <div class="svg-wrap">\${daySvg}</div>
+            </div>
+
             <div class="week-drawer \${isWeekOpen ? 'open' : ''}">
-              <div class="chart-box">
-                <div class="chart-hdr">
-                  <div style="display:flex; align-items:center; gap:6px;">
-                    <span class="chart-label">1W TREND</span>
-                    <span class="badge \${weekBadge}">\${weekSign}\${item.weeklyChangePct.toFixed(2)}%</span>
-                  </div>
-                  <span id="\${weekSvgId}-readout" class="scrub-readout"></span>
+              <div class="week-drawer-hdr">
+                <div style="display:flex; align-items:center; gap:6px;">
+                  <span class="badge \${weekBadge}">\${weekSign}\${item.weeklyChangePct.toFixed(2)}%</span>
+                  <span class="sub">5D Trend</span>
                 </div>
+                <span id="\${weekSvgId}-readout" class="scrub-readout"></span>
+              </div>
+              <div class="chart-box">
                 <div class="svg-wrap">\${weekSvg}</div>
               </div>
             </div>
