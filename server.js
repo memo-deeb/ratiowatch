@@ -36,8 +36,39 @@ const RATIO_PAIRS = [
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
 
+function get24HourBounds() {
+  const now = new Date();
+  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const etDate = new Date(etStr);
+  const etHour = etDate.getHours();
+  const etMin = etDate.getMinutes();
+
+  // If before 20:00 ET, cycle started yesterday at 20:00 ET
+  // If 20:00 ET or later, cycle started today at 20:00 ET
+  const cycleStartET = new Date(etDate);
+  if (etHour < 20) {
+    cycleStartET.setDate(cycleStartET.getDate() - 1);
+  }
+  cycleStartET.setHours(20, 0, 0, 0);
+
+  const startUtc = Math.floor(new Date(cycleStartET.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() / 1000);
+  const endUtc = startUtc + 86400; // +24 hours
+  const preStart = startUtc + 28800; // +8h (04:00 ET)
+  const regStart = startUtc + 48600; // +13.5h (09:30 ET)
+  const regEnd = startUtc + 72000;   // +20h (16:00 ET)
+
+  let state = 'REG';
+  const timeFraction = etHour + etMin / 60;
+  if (timeFraction >= 4.0 && timeFraction < 9.5) state = 'PRE';
+  else if (timeFraction >= 9.5 && timeFraction < 16.0) state = 'REG';
+  else if (timeFraction >= 16.0 && timeFraction < 20.0) state = 'POST';
+  else state = 'OVERNIGHT';
+
+  return { startUtc, endUtc, preStart, regStart, regEnd, state };
+}
+
 async function fetchTicker(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=false`;
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true`;
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
@@ -57,28 +88,39 @@ async function fetchTicker(symbol) {
     }
   }
 
-  const curPrice = meta.regularMarketPrice || (history.length ? history[history.length - 1].c : 0);
+  const { startUtc, endUtc, preStart, regStart, regEnd, state } = get24HourBounds();
+  const lastTick = history.length ? history[history.length - 1] : null;
+
+  let curPrice = meta.regularMarketPrice || (lastTick ? lastTick.c : 0);
+  let sessionState = state;
+
+  if (symbol.includes('BTC')) {
+    sessionState = '24/7';
+    if (lastTick) curPrice = lastTick.c;
+  } else if (sessionState === 'PRE' && meta.preMarketPrice) {
+    curPrice = meta.preMarketPrice;
+  } else if (sessionState === 'POST' && meta.postMarketPrice) {
+    curPrice = meta.postMarketPrice;
+  } else if (sessionState === 'OVERNIGHT' && lastTick) {
+    curPrice = lastTick.c;
+  }
+
   const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
   const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
 
-  const reg = meta.currentTradingPeriod?.regular;
-  let sessionStart = reg?.start;
-  let sessionEnd = reg?.end;
-
-  const lastTickT = history.length ? history[history.length - 1].t : 0;
-  if (!sessionStart || lastTickT < sessionStart - 3600) {
-    const lastDate = new Date(lastTickT * 1000).toDateString();
-    const sameDay = history.filter(h => new Date(h.t * 1000).toDateString() === lastDate);
-    if (sameDay.length) {
-      sessionStart = sameDay[0].t;
-      sessionEnd = sessionStart + 23400;
-    } else {
-      sessionStart = lastTickT - 23400;
-      sessionEnd = lastTickT;
-    }
-  }
-
-  return { symbol, price: curPrice, dailyPrevClose, weeklyPrevClose, sessionStart, sessionEnd, history };
+  return {
+    symbol,
+    price: curPrice,
+    dailyPrevClose,
+    weeklyPrevClose,
+    sessionStart: startUtc,
+    sessionEnd: endUtc,
+    preStart,
+    regStart,
+    regEnd,
+    sessionState,
+    history
+  };
 }
 
 async function syncAll() {
@@ -103,8 +145,9 @@ async function syncAll() {
     const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
     const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
+    // Filter all ticks belonging to the current 24-hour cycle
     const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
+    const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-288);
 
     results.push({
       id: item.name,
@@ -117,6 +160,10 @@ async function syncAll() {
       weeklyChangePct,
       sessionStart: d.sessionStart,
       sessionEnd: d.sessionEnd,
+      regStart: d.regStart,
+      regEnd: d.regEnd,
+      preStart: d.preStart,
+      sessionState: d.sessionState,
       daySeries: dayHistory,
       weekSeries: d.history
     });
@@ -143,8 +190,12 @@ async function syncAll() {
 
     const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
     const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
+    const regStart = Math.max(d1.regStart, d2.regStart);
+    const regEnd = Math.max(d1.regEnd, d2.regEnd);
+    const preStart = Math.max(d1.preStart, d2.preStart);
+
     const dayTicks = matched.filter(m => m.t >= (sessionStart - 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
+    const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-288);
 
     const id = `${pair.t1}/${pair.t2}`;
     results.push({
@@ -158,6 +209,10 @@ async function syncAll() {
       weeklyChangePct,
       sessionStart,
       sessionEnd,
+      regStart,
+      regEnd,
+      preStart,
+      sessionState: d1.sessionState,
       daySeries: dayHistory,
       weekSeries: matched
     });
@@ -210,6 +265,7 @@ app.get('/', (req, res) => {
       --axis: #525974;
       --grid: #151822;
       --base: #373e54;
+      --reg-zone: rgba(255, 255, 255, 0.02);
       --btn-bg: #141722;
       --btn-border: #23283a;
       --flash-up: rgba(0, 230, 100, 0.85);
@@ -225,6 +281,7 @@ app.get('/', (req, res) => {
       --axis: #6e768b;
       --grid: #22242c;
       --base: #42495d;
+      --reg-zone: rgba(255, 255, 255, 0.025);
       --btn-bg: #22242c;
       --btn-border: #313542;
       --flash-up: rgba(0, 230, 100, 0.85);
@@ -240,6 +297,7 @@ app.get('/', (req, res) => {
       --axis: #64748b;
       --grid: #1e293b;
       --base: #3b4252;
+      --reg-zone: rgba(255, 255, 255, 0.025);
       --btn-bg: #1e293b;
       --btn-border: #334155;
       --flash-up: rgba(16, 185, 129, 0.85);
@@ -255,6 +313,7 @@ app.get('/', (req, res) => {
       --axis: #8b92a2;
       --grid: #eae4d7;
       --base: #b4bccb;
+      --reg-zone: rgba(0, 0, 0, 0.02);
       --btn-bg: #ebe5d8;
       --btn-border: #dcd3bf;
       --flash-up: rgba(16, 185, 129, 0.7);
@@ -270,6 +329,7 @@ app.get('/', (req, res) => {
       --axis: #94a3b8;
       --grid: #e2e8f0;
       --base: #cbd5e1;
+      --reg-zone: rgba(0, 0, 0, 0.025);
       --btn-bg: #e2e8f0;
       --btn-border: #cbd5e1;
       --flash-up: rgba(16, 185, 129, 0.7);
@@ -313,7 +373,6 @@ app.get('/', (req, res) => {
     }
     .card.dragging { opacity: 0.35; border: 1px dashed #00c805; }
 
-    /* Single Consolidated Header Bar */
     .card-topbar {
       display: flex;
       justify-content: space-between;
@@ -360,13 +419,27 @@ app.get('/', (req, res) => {
       border-radius: 4px;
       white-space: nowrap;
     }
+
+    /* Distinct Session Badges */
+    .state-badge {
+      font-size: 0.62rem;
+      font-weight: 800;
+      padding: 1px 5px;
+      border-radius: 3px;
+      letter-spacing: 0.5px;
+      white-space: nowrap;
+    }
+    .state-on { background: rgba(0, 180, 255, 0.18); color: #00c8ff; border: 1px solid rgba(0, 180, 255, 0.4); }
+    .state-pre { background: rgba(255, 165, 0, 0.18); color: #ffa500; border: 1px solid rgba(255, 165, 0, 0.4); }
+    .state-post { background: rgba(186, 85, 211, 0.18); color: #ba55d3; border: 1px solid rgba(186, 85, 211, 0.4); }
+
     .sub {
       font-size: 0.68rem;
       color: var(--text-sub);
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      max-width: 130px;
+      max-width: 110px;
       font-weight: 500;
     }
 
@@ -387,7 +460,6 @@ app.get('/', (req, res) => {
     }
     .week-pill.active { background: #00c805; color: #000; border-color: #00c805; }
 
-    /* Flash Animations */
     @keyframes flashGreen {
       0% { background: var(--flash-up); color: #fff; box-shadow: 0 0 16px var(--flash-up); }
       40% { background: rgba(0, 230, 100, 0.35); }
@@ -401,7 +473,6 @@ app.get('/', (req, res) => {
     .flash-up { animation: flashGreen 1.4s ease-out; }
     .flash-down { animation: flashRed 1.4s ease-out; }
 
-    /* Full-Width Chart Canvas */
     .chart-box {
       width: 100%;
       background: var(--chart-bg);
@@ -417,6 +488,9 @@ app.get('/', (req, res) => {
     .grid-line { stroke: var(--grid); stroke-width: 1; }
     .base-line { stroke: var(--base); stroke-dasharray: 3,3; stroke-width: 1.2; }
     .day-divider { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2,2; }
+    .session-divider { stroke: #3a4154; stroke-width: 1; stroke-dasharray: 2,2; }
+    .reg-zone-rect { fill: var(--reg-zone); }
+
     .chart-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
     .chart-area { stroke: none; opacity: 0.12; }
     .day-dot { stroke: var(--chart-bg); stroke-width: 1.2; }
@@ -434,7 +508,6 @@ app.get('/', (req, res) => {
     .cursor-line { stroke: var(--text); stroke-dasharray: 2,2; stroke-width: 1; opacity: 0.7; }
     .cursor-dot { fill: var(--text); stroke: var(--bg); stroke-width: 2; }
 
-    /* Collapsible Weekly Drawer */
     .week-drawer {
       display: none;
       margin-top: 8px;
@@ -518,7 +591,7 @@ app.get('/', (req, res) => {
       return new Date(ts * 1000).toLocaleDateString([], { weekday: 'short' });
     }
 
-    function buildSvg(id, series, baselineVal, isDay, sStart, sEnd) {
+    function buildSvg(id, series, baselineVal, isDay, sStart, sEnd, regStart, regEnd, preStart) {
       if (!series || series.length < 2) return '';
       const w = 440, h = 130;
       const padTop = 10, padBtm = 20, padLeft = 6, padRight = 55;
@@ -530,7 +603,7 @@ app.get('/', (req, res) => {
       const max = Math.max(...vals);
       const range = max === min ? 1 : max - min;
 
-      let sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
+      const sessionDuration = 86400; // Full 24-hour cycle
 
       const pts = series.map((s, i) => {
         let xFrac;
@@ -557,6 +630,21 @@ app.get('/', (req, res) => {
       if (baselineVal && baselineVal >= min && baselineVal <= max) {
         const by = padTop + ch - ((baselineVal - min) / range) * ch;
         baseSvg = '<line class="base-line" x1="' + padLeft + '" y1="' + by.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + by.toFixed(1) + '" />';
+      }
+
+      // Shaded Regular Cash Session (09:30 - 16:00 ET)
+      let sessionZoneSvg = '';
+      if (isDay && sStart && regStart && regEnd) {
+        const rx1 = padLeft + Math.max(0, Math.min(1, (regStart - sStart) / sessionDuration)) * cw;
+        const rx2 = padLeft + Math.max(0, Math.min(1, (regEnd - sStart) / sessionDuration)) * cw;
+        const px1 = preStart ? (padLeft + Math.max(0, Math.min(1, (preStart - sStart) / sessionDuration)) * cw) : rx1;
+
+        sessionZoneSvg = \`
+          <line class="session-divider" x1="\${px1.toFixed(1)}" y1="\${padTop}" x2="\${px1.toFixed(1)}" y2="\${padTop + ch}" />
+          <rect class="reg-zone-rect" x="\${rx1.toFixed(1)}" y="\${padTop}" width="\${(rx2 - rx1).toFixed(1)}" height="\${ch}" />
+          <line class="session-divider" x1="\${rx1.toFixed(1)}" y1="\${padTop}" x2="\${rx1.toFixed(1)}" y2="\${padTop + ch}" />
+          <line class="session-divider" x1="\${rx2.toFixed(1)}" y1="\${padTop}" x2="\${rx2.toFixed(1)}" y2="\${padTop + ch}" />
+        \`;
       }
 
       let dayMarkersSvg = '';
@@ -588,10 +676,10 @@ app.get('/', (req, res) => {
       const fmtY = v => v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
 
       let xStart, xMid, xEnd;
-      if (isDay && sStart && sEnd) {
+      if (isDay && sStart) {
         xStart = formatTime(sStart);
-        xMid = formatTime(sStart + sessionDuration / 2);
-        xEnd = formatTime(sEnd);
+        xMid = formatTime(sStart + 43200);
+        xEnd = formatTime(sStart + 86400);
       } else {
         xStart = formatDay(series[0].t);
         xMid = formatDay(series[Math.floor(series.length / 2)].t);
@@ -605,6 +693,7 @@ app.get('/', (req, res) => {
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop}" x2="\${padLeft + cw}" y2="\${padTop}" />
           <line class="grid-line" x1="\${padLeft}" y1="\${midY.toFixed(1)}" x2="\${padLeft + cw}" y2="\${midY.toFixed(1)}" />
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop + ch}" x2="\${padLeft + cw}" y2="\${padTop + ch}" />
+          \${sessionZoneSvg}
           \${baseSvg}
           \${dayMarkersSvg}
 
@@ -756,11 +845,20 @@ app.get('/', (req, res) => {
         }
         previousPrices[id] = item.price;
 
+        let stateTagHtml = '';
+        if (item.sessionState === 'OVERNIGHT') {
+          stateTagHtml = '<span class="state-badge state-on">OVERNIGHT</span>';
+        } else if (item.sessionState === 'PRE') {
+          stateTagHtml = '<span class="state-badge state-pre">PRE</span>';
+        } else if (item.sessionState === 'POST') {
+          stateTagHtml = '<span class="state-badge state-post">POST</span>';
+        }
+
         const daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
         const weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
         const isWeekOpen = !!openWeekDrawers[id];
-        const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
+        const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd, item.regStart, item.regEnd, item.preStart);
         const weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
 
         html += \`
@@ -775,6 +873,7 @@ app.get('/', (req, res) => {
                   <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
                 </div>
                 <span class="sym">\${item.name}</span>
+                \${stateTagHtml}
                 <span class="price-val \${flashClass}">\${priceStr}</span>
                 <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
                 <span class="sub">\${item.sub}</span>
