@@ -38,12 +38,19 @@ let LAST_UPDATE = 0;
 const RAW_CACHE = {};
 const BO_CACHE = {};
 
-// Fast fetch with strict 2.5s abort
-async function fastFetch(url, headers = {}, timeoutMs = 2500) {
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+  'Accept': 'application/json, text/plain, */*',
+  'Accept-Language': 'en-US,en;q=0.9',
+  'Origin': 'https://finance.yahoo.com',
+  'Referer': 'https://finance.yahoo.com'
+};
+
+async function fastFetch(url, customHeaders = {}, timeoutMs = 3000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: ctrl.signal, headers });
+    const res = await fetch(url, { signal: ctrl.signal, headers: { ...HEADERS, ...customHeaders } });
     clearTimeout(t);
     return res;
   } catch (e) {
@@ -52,13 +59,10 @@ async function fastFetch(url, headers = {}, timeoutMs = 2500) {
   }
 }
 
-// 1. Fast Yahoo 15m Chart Fetcher
 async function fetchYahoo(symbol) {
-  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
-  const res = await fastFetch(url, {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
-  }, 2500);
-
+  // query2 mirror has significantly lower rate-limiting thresholds
+  const url = 'https://query2.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
+  const res = await fastFetch(url, {}, 3000);
   if (!res || !res.ok) return null;
   try {
     const json = await res.json();
@@ -107,30 +111,16 @@ async function fetchYahoo(symbol) {
       }
     }
 
-    return {
-      symbol,
-      price: curPrice,
-      extPrice,
-      extLabel,
-      dailyPrevClose,
-      weeklyPrevClose,
-      sStart,
-      sEnd,
-      history
-    };
+    return { symbol, price: curPrice, extPrice, extLabel, dailyPrevClose, weeklyPrevClose, sStart, sEnd, history };
   } catch (e) {
     return null;
   }
 }
 
-// 2. Isolated Webull BOATS Fetcher
 async function fetchWebull(wid) {
   if (!wid) return null;
   const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
-  const res = await fastFetch(url, {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'hl': 'en', 'gl': 'us'
-  }, 1800);
+  const res = await fastFetch(url, { 'hl': 'en', 'gl': 'us', 'platform': 'pc' }, 2000);
   if (!res || !res.ok) return null;
   try {
     const d = await res.json();
@@ -140,18 +130,17 @@ async function fetchWebull(wid) {
   return null;
 }
 
-// Background loop for Webull (runs independently every 8 seconds)
+// Background Webull worker runs every 10 seconds without blocking main thread
 async function webullWorker() {
   const stockItems = BASE_SYMBOLS.filter(s => s.isStock && s.wid);
   for (const item of stockItems) {
     const data = await fetchWebull(item.wid);
     if (data) BO_CACHE[item.sym] = data;
   }
-  setTimeout(webullWorker, 8000);
+  setTimeout(webullWorker, 10000);
 }
 webullWorker();
 
-// Core fast aggregation cycle
 async function buildPayload() {
   await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
     const d = await fetchYahoo(item.sym);
@@ -160,7 +149,6 @@ async function buildPayload() {
 
   const list = [];
 
-  // 1. Process Base Singles
   for (const item of BASE_SYMBOLS) {
     const d = RAW_CACHE[item.sym];
     if (!d || !d.history.length) continue;
@@ -181,25 +169,14 @@ async function buildPayload() {
     }
 
     list.push({
-      id: item.name,
-      name: item.name,
-      sub: item.sub,
-      price: cur,
-      extPrice: extPct !== null ? extP : null,
-      extPct,
-      extLabel: extL,
-      dailyPrev: d.dailyPrevClose,
-      weeklyPrev: d.weeklyPrevClose,
-      dayPct,
-      weekPct,
-      sStart: d.sStart,
-      sEnd: d.sEnd,
-      daySeries: dayHistory,
-      weekSeries: d.history
+      id: item.name, name: item.name, sub: item.sub,
+      price: cur, extPrice: extPct !== null ? extP : null, extPct, extLabel: extL,
+      dailyPrev: d.dailyPrevClose, weeklyPrev: d.weeklyPrevClose,
+      dayPct, weekPct, sStart: d.sStart, sEnd: d.sEnd,
+      daySeries: dayHistory, weekSeries: d.history
     });
   }
 
-  // 2. Process Ratio Spreads
   for (const pair of RATIO_PAIRS) {
     const d1 = RAW_CACHE[pair.t1];
     const d2 = RAW_CACHE[pair.t2];
@@ -239,21 +216,11 @@ async function buildPayload() {
     }
 
     list.push({
-      id: pair.t1 + '/' + pair.t2,
-      name: pair.t1 + '/' + pair.t2,
-      sub: 'Spread',
-      price: curRatio,
-      extPrice: extRatio,
-      extPct,
-      extLabel,
-      dailyPrev: dailyPrevRatio,
-      weeklyPrev: weeklyPrevRatio,
-      dayPct,
-      weekPct,
-      sStart,
-      sEnd,
-      daySeries: dayHistory,
-      weekSeries: matched
+      id: pair.t1 + '/' + pair.t2, name: pair.t1 + '/' + pair.t2, sub: 'Spread',
+      price: curRatio, extPrice: extRatio, extPct, extLabel,
+      dailyPrev: dailyPrevRatio, weeklyPrev: weeklyPrevRatio,
+      dayPct, weekPct, sStart, sEnd,
+      daySeries: dayHistory, weekSeries: matched
     });
   }
 
@@ -263,10 +230,9 @@ async function buildPayload() {
   }
 }
 
-// Rapid non-blocking server polling (every 2.5 seconds)
 async function coreWorker() {
   await buildPayload();
-  setTimeout(coreWorker, 2500);
+  setTimeout(coreWorker, 3000);
 }
 coreWorker();
 
@@ -276,12 +242,8 @@ app.get('/api/data', (req, res) => {
 
 app.get('/manifest.json', (req, res) => {
   res.json({
-    name: "RatioWatch Pro",
-    short_name: "RatioWatch",
-    start_url: "/",
-    display: "standalone",
-    background_color: "#0a0b0e",
-    theme_color: "#0a0b0e",
+    name: "RatioWatch Pro", short_name: "RatioWatch", start_url: "/", display: "standalone",
+    background_color: "#0a0b0e", theme_color: "#0a0b0e",
     icons: [{ src: "https://cdn-icons-png.flaticon.com/512/2422/2422796.png", sizes: "512x512", type: "image/png" }]
   });
 });
@@ -299,94 +261,34 @@ app.get('/', (req, res) => {
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <style>
     :root[data-theme="oled"] {
-      --bg: #000000;
-      --card-bg: #0b0c10;
-      --card-border: #161822;
-      --chart-bg: #040507;
-      --text: #f3f5f9;
-      --text-sub: #6c738c;
-      --axis: #525974;
-      --grid: #151822;
-      --base: #373e54;
-      --btn-bg: #141722;
-      --btn-border: #23283a;
-      --ext-blue: #38bdf8;
-      --ext-bg: rgba(56, 189, 248, 0.12);
-      --ext-border: rgba(56, 189, 248, 0.35);
-      --flash-up: rgba(0, 230, 100, 0.85);
-      --flash-down: rgba(255, 60, 60, 0.85);
+      --bg: #000000; --card-bg: #0b0c10; --card-border: #161822; --chart-bg: #040507;
+      --text: #f3f5f9; --text-sub: #6c738c; --axis: #525974; --grid: #151822; --base: #373e54;
+      --btn-bg: #141722; --btn-border: #23283a; --ext-blue: #38bdf8; --ext-bg: rgba(56, 189, 248, 0.12);
+      --ext-border: rgba(56, 189, 248, 0.35); --flash-up: rgba(0, 230, 100, 0.85); --flash-down: rgba(255, 60, 60, 0.85);
     }
     :root[data-theme="darkgray"] {
-      --bg: #111216;
-      --card-bg: #18191f;
-      --card-border: #262832;
-      --chart-bg: #131418;
-      --text: #f3f5f9;
-      --text-sub: #828a9e;
-      --axis: #6e768b;
-      --grid: #22242c;
-      --base: #42495d;
-      --btn-bg: #22242c;
-      --btn-border: #313542;
-      --ext-blue: #38bdf8;
-      --ext-bg: rgba(56, 189, 248, 0.14);
-      --ext-border: rgba(56, 189, 248, 0.35);
-      --flash-up: rgba(0, 230, 100, 0.85);
-      --flash-down: rgba(255, 60, 60, 0.85);
+      --bg: #111216; --card-bg: #18191f; --card-border: #262832; --chart-bg: #131418;
+      --text: #f3f5f9; --text-sub: #828a9e; --axis: #6e768b; --grid: #22242c; --base: #42495d;
+      --btn-bg: #22242c; --btn-border: #313542; --ext-blue: #38bdf8; --ext-bg: rgba(56, 189, 248, 0.14);
+      --ext-border: rgba(56, 189, 248, 0.35); --flash-up: rgba(0, 230, 100, 0.85); --flash-down: rgba(255, 60, 60, 0.85);
     }
     :root[data-theme="navy"] {
-      --bg: #090e1a;
-      --card-bg: #0f172a;
-      --card-border: #1e293b;
-      --chart-bg: #0b1120;
-      --text: #f8fafc;
-      --text-sub: #94a3b8;
-      --axis: #64748b;
-      --grid: #1e293b;
-      --base: #3b4252;
-      --btn-bg: #1e293b;
-      --btn-border: #334155;
-      --ext-blue: #60a5fa;
-      --ext-bg: rgba(96, 165, 250, 0.14);
-      --ext-border: rgba(96, 165, 250, 0.35);
-      --flash-up: rgba(16, 185, 129, 0.85);
-      --flash-down: rgba(239, 68, 68, 0.85);
+      --bg: #090e1a; --card-bg: #0f172a; --card-border: #1e293b; --chart-bg: #0b1120;
+      --text: #f8fafc; --text-sub: #94a3b8; --axis: #64748b; --grid: #1e293b; --base: #3b4252;
+      --btn-bg: #1e293b; --btn-border: #334155; --ext-blue: #60a5fa; --ext-bg: rgba(96, 165, 250, 0.14);
+      --ext-border: rgba(96, 165, 250, 0.35); --flash-up: rgba(16, 185, 129, 0.85); --flash-down: rgba(239, 68, 68, 0.85);
     }
     :root[data-theme="warm"] {
-      --bg: #f3efe6;
-      --card-bg: #ffffff;
-      --card-border: #e0d9cc;
-      --chart-bg: #faf7f2;
-      --text: #1f2329;
-      --text-sub: #7a8192;
-      --axis: #8b92a2;
-      --grid: #eae4d7;
-      --base: #b4bccb;
-      --btn-bg: #ebe5d8;
-      --btn-border: #dcd3bf;
-      --ext-blue: #0284c7;
-      --ext-bg: rgba(2, 132, 199, 0.12);
-      --ext-border: rgba(2, 132, 199, 0.3);
-      --flash-up: rgba(16, 185, 129, 0.7);
-      --flash-down: rgba(239, 68, 68, 0.7);
+      --bg: #f3efe6; --card-bg: #ffffff; --card-border: #e0d9cc; --chart-bg: #faf7f2;
+      --text: #1f2329; --text-sub: #7a8192; --axis: #8b92a2; --grid: #eae4d7; --base: #b4bccb;
+      --btn-bg: #ebe5d8; --btn-border: #dcd3bf; --ext-blue: #0284c7; --ext-bg: rgba(2, 132, 199, 0.12);
+      --ext-border: rgba(2, 132, 199, 0.3); --flash-up: rgba(16, 185, 129, 0.7); --flash-down: rgba(239, 68, 68, 0.7);
     }
     :root[data-theme="light"] {
-      --bg: #f8fafc;
-      --card-bg: #ffffff;
-      --card-border: #e2e8f0;
-      --chart-bg: #f1f5f9;
-      --text: #0f172a;
-      --text-sub: #64748b;
-      --axis: #94a3b8;
-      --grid: #e2e8f0;
-      --base: #cbd5e1;
-      --btn-bg: #e2e8f0;
-      --btn-border: #cbd5e1;
-      --ext-blue: #2563eb;
-      --ext-bg: rgba(37, 99, 235, 0.1);
-      --ext-border: rgba(37, 99, 235, 0.25);
-      --flash-up: rgba(16, 185, 129, 0.7);
-      --flash-down: rgba(239, 68, 68, 0.7);
+      --bg: #f8fafc; --card-bg: #ffffff; --card-border: #e2e8f0; --chart-bg: #f1f5f9;
+      --text: #0f172a; --text-sub: #64748b; --axis: #94a3b8; --grid: #e2e8f0; --base: #cbd5e1;
+      --btn-bg: #e2e8f0; --btn-border: #cbd5e1; --ext-blue: #2563eb; --ext-bg: rgba(37, 99, 235, 0.1);
+      --ext-border: rgba(37, 99, 235, 0.25); --flash-up: rgba(16, 185, 129, 0.7); --flash-down: rgba(239, 68, 68, 0.7);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-feature-settings: "tnum" 1; }
@@ -397,6 +299,7 @@ app.get('/', (req, res) => {
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
     .dot { width: 7px; height: 7px; background: #00c805; border-radius: 50%; box-shadow: 0 0 6px #00c805; }
+    .dot.syncing { background: #eab308; box-shadow: 0 0 6px #eab308; }
 
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .action-btn, select.theme-select {
@@ -405,48 +308,24 @@ app.get('/', (req, res) => {
     }
 
     .watchlist { margin-top: 8px; }
-    .watchlist.card-view {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-      gap: 10px;
-    }
-    .watchlist.list-view {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
+    .watchlist.card-view { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
+    .watchlist.list-view { display: flex; flex-direction: column; gap: 8px; }
+
+    .notice {
+      text-align: center; padding: 40px 16px; color: var(--text-sub); font-size: 0.85rem; font-weight: 600;
     }
 
     .card {
-      background: var(--card-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 8px;
-      padding: 8px 10px 10px;
-      transition: background 0.2s, border-color 0.2s;
+      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
+      padding: 8px 10px 10px; transition: background 0.2s, border-color 0.2s;
     }
     .card.dragging { opacity: 0.35; border: 1px dashed #00c805; }
 
     .card-topbar {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 6px;
-      flex-wrap: nowrap;
+      display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 6px; flex-wrap: nowrap;
     }
-    .topbar-left {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      min-width: 0;
-      flex-shrink: 1;
-      overflow: hidden;
-    }
-    .topbar-right {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      flex-shrink: 0;
-    }
+    .topbar-left { display: flex; align-items: center; gap: 6px; min-width: 0; flex-shrink: 1; overflow: hidden; }
+    .topbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
 
     .drag-handle { color: var(--text-sub); cursor: grab; font-size: 0.95rem; line-height: 1; }
     .reorder-btns { display: flex; gap: 2px; }
@@ -457,61 +336,24 @@ app.get('/', (req, res) => {
     .btn-ctrl:active { background: #00c805; color: #000; }
 
     .sym { font-size: 0.95rem; font-weight: 800; white-space: nowrap; }
-    .price-val {
-      font-size: 1.12rem;
-      font-weight: 800;
-      padding: 1px 4px;
-      border-radius: 4px;
-      white-space: nowrap;
-      display: inline-block;
-    }
+    .price-val { font-size: 1.12rem; font-weight: 800; padding: 1px 4px; border-radius: 4px; white-space: nowrap; display: inline-block; }
 
     .ext-price-badge {
-      display: inline-flex;
-      align-items: baseline;
-      gap: 4px;
-      color: var(--ext-blue);
-      background: var(--ext-bg);
-      border: 1px solid var(--ext-border);
-      padding: 1px 6px;
-      border-radius: 4px;
-      font-size: 0.92rem;
-      font-weight: 800;
-      white-space: nowrap;
-      box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
+      display: inline-flex; align-items: baseline; gap: 4px; color: var(--ext-blue); background: var(--ext-bg);
+      border: 1px solid var(--ext-border); padding: 1px 6px; border-radius: 4px; font-size: 0.92rem; font-weight: 800;
+      white-space: nowrap; box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
     }
     .ext-price { font-weight: 800; }
     .ext-pct { font-size: 0.72rem; font-weight: 700; opacity: 0.95; }
     .ext-label { font-size: 0.58rem; font-weight: 900; letter-spacing: 0.4px; opacity: 0.8; text-transform: uppercase; }
 
-    .badge {
-      font-size: 0.75rem;
-      font-weight: 800;
-      padding: 2px 6px;
-      border-radius: 4px;
-      white-space: nowrap;
-    }
-    .sub {
-      font-size: 0.68rem;
-      color: var(--text-sub);
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 110px;
-      font-weight: 500;
-    }
+    .badge { font-size: 0.75rem; font-weight: 800; padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+    .sub { font-size: 0.68rem; color: var(--text-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 110px; font-weight: 500; }
 
     .up-bg { background: rgba(0, 200, 5, 0.16); color: #00c805; }
     .down-bg { background: rgba(255, 59, 48, 0.16); color: #ff3b30; }
 
-    .scrub-readout {
-      font-size: 0.72rem;
-      color: #00c805;
-      font-weight: 800;
-      white-space: nowrap;
-      min-width: 70px;
-      text-align: right;
-    }
+    .scrub-readout { font-size: 0.72rem; color: #00c805; font-weight: 800; white-space: nowrap; min-width: 70px; text-align: right; }
     .week-pill {
       background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text-sub);
       font-size: 0.65rem; font-weight: 800; padding: 2px 6px; border-radius: 4px; cursor: pointer;
@@ -532,12 +374,8 @@ app.get('/', (req, res) => {
     .flash-down { animation: flashRed 1.4s ease-out; }
 
     .chart-box {
-      width: 100%;
-      background: var(--chart-bg);
-      border: 1px solid var(--card-border);
-      border-radius: 6px;
-      padding: 6px 8px;
-      position: relative;
+      width: 100%; background: var(--chart-bg); border: 1px solid var(--card-border);
+      border-radius: 6px; padding: 6px 8px; position: relative;
     }
     .svg-wrap { width: 100%; height: 130px; position: relative; }
     svg { width: 100%; height: 100%; overflow: visible; display: block; }
@@ -550,33 +388,15 @@ app.get('/', (req, res) => {
     .chart-area { stroke: none; opacity: 0.12; }
     .day-dot { stroke: var(--chart-bg); stroke-width: 1.2; }
 
-    .live-dot-outer {
-      animation: pulseBeacon 2s infinite ease-in-out;
-      transform-origin: center;
-    }
-    @keyframes pulseBeacon {
-      0% { r: 5px; opacity: 0.8; }
-      50% { r: 9px; opacity: 0.2; }
-      100% { r: 5px; opacity: 0.8; }
-    }
+    .live-dot-outer { animation: pulseBeacon 2s infinite ease-in-out; transform-origin: center; }
+    @keyframes pulseBeacon { 0% { r: 5px; opacity: 0.8; } 50% { r: 9px; opacity: 0.2; } 100% { r: 5px; opacity: 0.8; } }
 
     .cursor-line { stroke: var(--text); stroke-dasharray: 2,2; stroke-width: 1; opacity: 0.7; }
     .cursor-dot { fill: var(--text); stroke: var(--bg); stroke-width: 2; }
 
-    .week-drawer {
-      display: none;
-      margin-top: 8px;
-      padding-top: 8px;
-      border-top: 1px solid var(--card-border);
-    }
+    .week-drawer { display: none; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--card-border); }
     .week-drawer.open { display: block; }
-    .week-drawer-hdr {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 4px;
-      font-size: 0.72rem;
-    }
+    .week-drawer-hdr { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; font-size: 0.72rem; }
   </style>
 </head>
 <body>
@@ -584,7 +404,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">LIVE</span></div>
+      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">CONNECTED</span></div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -599,7 +419,9 @@ app.get('/', (req, res) => {
     </div>
   </header>
 
-  <div class="watchlist card-view" id="watchlist"></div>
+  <div class="watchlist card-view" id="watchlist">
+    <div class="notice" id="loadingNotice">Connecting to live feed...</div>
+  </div>
 
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
@@ -845,7 +667,6 @@ app.get('/', (req, res) => {
 
       var existingCards = container.querySelectorAll('.card');
       if (existingCards.length === savedOrder.length && !forceFullRebuild) {
-        // Fast in-place DOM patch: updates only numbers and price flashes with zero lag
         savedOrder.forEach(function(id) {
           var item = latestData[id];
           if (!item) return;
@@ -870,7 +691,6 @@ app.get('/', (req, res) => {
         return;
       }
 
-      // Initial or full layout build
       var html = '';
       savedOrder.forEach(function(id) {
         var item = latestData[id];
@@ -952,18 +772,28 @@ app.get('/', (req, res) => {
       try {
         var res = await fetch('/api/data');
         var json = await res.json();
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+
         if (json.items && json.items.length) {
           json.items.forEach(function(i) { latestData[i.id] = i; });
           localStorage.setItem('cached_ratios', JSON.stringify(latestData));
           renderList(false);
+          dot.className = 'dot';
+          txt.textContent = 'LIVE (' + json.items.length + ')';
         }
-      } catch (e) {}
+      } catch (e) {
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+        dot.className = 'dot syncing';
+        txt.textContent = 'CONNECTING';
+      }
     }
 
-    // 1. Instant 0ms Paint from local cache
+    // 1. Instant paint from device cache
     renderList(true);
 
-    // 2. Poll every 2 seconds
+    // 2. Continuous 2s background poll
     poll();
     setInterval(poll, 2000);
   </script>
