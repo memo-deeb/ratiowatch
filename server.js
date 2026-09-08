@@ -38,33 +38,22 @@ let LAST_UPDATE = 0;
 const RAW_CACHE = {};
 const BO_CACHE = {};
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-  'Accept': 'application/json, text/plain, */*',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Origin': 'https://finance.yahoo.com',
-  'Referer': 'https://finance.yahoo.com'
-};
-
-async function fastFetch(url, customHeaders = {}, timeoutMs = 3000) {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, headers: { ...HEADERS, ...customHeaders } });
-    clearTimeout(t);
-    return res;
-  } catch (e) {
-    clearTimeout(t);
-    return null;
-  }
-}
-
+// Clean fetch without forbidden browser headers
 async function fetchYahoo(symbol) {
-  // query2 mirror has significantly lower rate-limiting thresholds
-  const url = 'https://query2.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
-  const res = await fastFetch(url, {}, 3000);
-  if (!res || !res.ok) return null;
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
   try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 6000);
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        'Accept': '*/*'
+      }
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
+
     const json = await res.json();
     const r = json.chart?.result?.[0];
     if (!r) return null;
@@ -117,12 +106,19 @@ async function fetchYahoo(symbol) {
   }
 }
 
+// Background Blue Ocean fetcher
 async function fetchWebull(wid) {
   if (!wid) return null;
-  const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
-  const res = await fastFetch(url, { 'hl': 'en', 'gl': 'us', 'platform': 'pc' }, 2000);
-  if (!res || !res.ok) return null;
   try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 2500);
+    const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'hl': 'en', 'gl': 'us' }
+    });
+    clearTimeout(t);
+    if (!res.ok) return null;
     const d = await res.json();
     if (d.nightPrice && parseFloat(d.nightPrice) > 0) return { price: parseFloat(d.nightPrice), label: 'BOATS' };
     if (d.pPrice && parseFloat(d.pPrice) > 0) return { price: parseFloat(d.pPrice), label: d.status === 'P' ? 'PRE' : 'AH' };
@@ -130,7 +126,6 @@ async function fetchWebull(wid) {
   return null;
 }
 
-// Background Webull worker runs every 10 seconds without blocking main thread
 async function webullWorker() {
   const stockItems = BASE_SYMBOLS.filter(s => s.isStock && s.wid);
   for (const item of stockItems) {
@@ -141,7 +136,7 @@ async function webullWorker() {
 }
 webullWorker();
 
-async function buildPayload() {
+async function syncAll() {
   await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
     const d = await fetchYahoo(item.sym);
     if (d) RAW_CACHE[item.sym] = d;
@@ -230,13 +225,17 @@ async function buildPayload() {
   }
 }
 
-async function coreWorker() {
-  await buildPayload();
-  setTimeout(coreWorker, 3000);
+async function loop() {
+  await syncAll();
+  setTimeout(loop, 2500);
 }
-coreWorker();
+loop();
 
-app.get('/api/data', (req, res) => {
+// Guarantee initial payload before responding
+app.get('/api/data', async (req, res) => {
+  if (!CACHED_PAYLOAD.length) {
+    await syncAll();
+  }
   res.json({ updated: LAST_UPDATE, items: CACHED_PAYLOAD });
 });
 
@@ -311,9 +310,7 @@ app.get('/', (req, res) => {
     .watchlist.card-view { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
     .watchlist.list-view { display: flex; flex-direction: column; gap: 8px; }
 
-    .notice {
-      text-align: center; padding: 40px 16px; color: var(--text-sub); font-size: 0.85rem; font-weight: 600;
-    }
+    .notice { text-align: center; padding: 60px 16px; color: var(--text-sub); font-size: 0.9rem; font-weight: 600; }
 
     .card {
       background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
@@ -404,7 +401,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">CONNECTED</span></div>
+      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">SYNCING</span></div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -420,7 +417,7 @@ app.get('/', (req, res) => {
   </header>
 
   <div class="watchlist card-view" id="watchlist">
-    <div class="notice" id="loadingNotice">Connecting to live feed...</div>
+    <div class="notice" id="loadingNotice">Loading live market data...</div>
   </div>
 
   <script>
@@ -781,6 +778,9 @@ app.get('/', (req, res) => {
           renderList(false);
           dot.className = 'dot';
           txt.textContent = 'LIVE (' + json.items.length + ')';
+        } else {
+          dot.className = 'dot syncing';
+          txt.textContent = 'SYNCING';
         }
       } catch (e) {
         var dot = document.getElementById('liveDot');
@@ -790,10 +790,10 @@ app.get('/', (req, res) => {
       }
     }
 
-    // 1. Instant paint from device cache
+    // Paint immediately from cache if available
     renderList(true);
 
-    // 2. Continuous 2s background poll
+    // Continuous 2s polling
     poll();
     setInterval(poll, 2000);
   </script>
