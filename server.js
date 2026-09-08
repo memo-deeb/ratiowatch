@@ -7,17 +7,17 @@ const BASE_SYMBOLS = [
   { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isStock: false },
   { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isStock: false },
   { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar', isStock: false },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isStock: true },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isStock: true },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isStock: true },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isStock: true },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isStock: true },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isStock: true },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isStock: true },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true }
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true, webullId: '913253396' },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isStock: true, webullId: '913254556' },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true, webullId: '913444436' },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isStock: true, webullId: '913255280' },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true, webullId: null },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isStock: true, webullId: '913254287' },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isStock: true, webullId: '913444211' },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isStock: true, webullId: '913446973' },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isStock: true, webullId: '913254245' },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isStock: true, webullId: '913255167' },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true, webullId: '913255146' }
 ];
 
 const RATIO_PAIRS = [
@@ -35,46 +35,47 @@ const RATIO_PAIRS = [
 
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
-const WEBULL_TICKER_MAP = {}; // Cached symbol -> tickerId
 
-// 1. Blue Ocean ATS (Webull Gateway) Resolver
-async function resolveWebullId(symbol) {
-  if (WEBULL_TICKER_MAP[symbol]) return WEBULL_TICKER_MAP[symbol];
+// 1. Primary Off-Market & Live Quote Fetcher (Yahoo v7 Quote API)
+async function fetchAllQuotes(symbols) {
   try {
-    const url = `https://quotes-gw.webullfintech.com/api/search/pc/tickers?keyword=${encodeURIComponent(symbol)}&pageIndex=1&pageSize=1`;
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.map(encodeURIComponent).join(',')}`;
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'hl': 'en', 'gl': 'us'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'application/json'
       }
     });
-    if (res.ok) {
-      const json = await res.json();
-      if (json.data && json.data.length > 0) {
-        WEBULL_TICKER_MAP[symbol] = json.data[0].tickerId;
-        return json.data[0].tickerId;
-      }
+    if (!res.ok) return {};
+    const json = await res.json();
+    const list = json.quoteResponse?.result || [];
+    const map = {};
+    for (const q of list) {
+      map[q.symbol] = q;
     }
-  } catch (e) {}
-  return null;
+    return map;
+  } catch (e) {
+    return {};
+  }
 }
 
-async function fetchBlueOceanQuote(symbol) {
+// 2. Blue Ocean ATS Overnight Quote Fetcher
+async function fetchBlueOceanQuote(webullId) {
+  if (!webullId) return null;
   try {
-    const tickerId = await resolveWebullId(symbol);
-    if (!tickerId) return null;
-
-    const url = `https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=${tickerId}`;
+    const url = `https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=${webullId}`;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(url, {
+      signal: controller.signal,
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'hl': 'en', 'gl': 'us'
+        'hl': 'en', 'gl': 'us', 'platform': 'pc'
       }
     });
+    clearTimeout(timeout);
     if (!res.ok) return null;
     const d = await res.json();
-
-    // Webull returns nightPrice specifically for Blue Ocean ATS overnight trading
     if (d.nightPrice && parseFloat(d.nightPrice) > 0) {
       return { price: parseFloat(d.nightPrice), label: 'BOATS' };
     }
@@ -85,8 +86,8 @@ async function fetchBlueOceanQuote(symbol) {
   return null;
 }
 
-// 2. Yahoo Finance Core Data Fetcher
-async function fetchYahooTicker(symbol) {
+// 3. Intraday & 5-Day Historical Candles
+async function fetchTickerChart(symbol) {
   const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true`;
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
@@ -120,22 +121,9 @@ async function fetchYahooTicker(symbol) {
     sessionEnd = lastTick?.t || now;
   }
 
-  // Backup off-market price from Yahoo if Blue Ocean feed is quiet
-  let fallbackExtPrice = null;
-  let fallbackExtLabel = '';
-  if (meta.postMarketPrice && meta.postMarketPrice !== curPrice) {
-    fallbackExtPrice = meta.postMarketPrice;
-    fallbackExtLabel = 'AH';
-  } else if (meta.preMarketPrice && meta.preMarketPrice !== curPrice) {
-    fallbackExtPrice = meta.preMarketPrice;
-    fallbackExtLabel = 'PRE';
-  }
-
   return {
     symbol,
     price: curPrice,
-    fallbackExtPrice,
-    fallbackExtLabel,
     dailyPrevClose,
     weeklyPrevClose,
     sessionStart,
@@ -145,99 +133,150 @@ async function fetchYahooTicker(symbol) {
 }
 
 async function syncAll() {
-  const yMap = {};
-  const boMap = {};
+  const allSymbols = BASE_SYMBOLS.map(s => s.sym);
 
-  // Parallel fetch: Yahoo core candles + Blue Ocean ATS live quotes
-  await Promise.allSettled([
-    ...BASE_SYMBOLS.map(async (item) => {
-      try {
-        yMap[item.sym] = await fetchYahooTicker(item.sym);
-      } catch (e) {}
-    }),
-    ...BASE_SYMBOLS.filter(s => s.isStock).map(async (item) => {
-      try {
-        boMap[item.sym] = await fetchBlueOceanQuote(item.sym);
-      } catch (e) {}
-    })
+  const [chartMap, quotesMap, boMap] = await Promise.all([
+    (async () => {
+      const map = {};
+      await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
+        try { map[item.sym] = await fetchTickerChart(item.sym); } catch (e) {}
+      }));
+      return map;
+    })(),
+    fetchAllQuotes(allSymbols),
+    (async () => {
+      const map = {};
+      await Promise.allSettled(BASE_SYMBOLS.filter(s => s.isStock && s.webullId).map(async (item) => {
+        try { map[item.sym] = await fetchBlueOceanQuote(item.webullId); } catch (e) {}
+      }));
+      return map;
+    })()
   ]);
 
   const results = [];
 
-  // 1. Process Base Singles
+  // 1. Process Individual Symbols
   for (const item of BASE_SYMBOLS) {
-    const d = yMap[item.sym];
-    if (!d || !d.history.length) continue;
+    const c = chartMap[item.sym];
+    if (!c || !c.history.length) continue;
 
-    const curPrice = d.price;
-    const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
-    const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
+    const q = quotesMap[item.sym] || {};
+    const bo = boMap[item.sym];
 
-    const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300) && h.t <= (d.sessionEnd + 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
+    const curPrice = q.regularMarketPrice || c.price;
+    const dailyPrevClose = q.regularMarketPreviousClose || c.dailyPrevClose;
+    const weeklyPrevClose = c.weeklyPrevClose;
 
-    // Prioritize Blue Ocean ATS price; fallback to Yahoo extended hours
-    const boData = boMap[item.sym];
-    const extPrice = boData?.price || d.fallbackExtPrice;
-    const extLabel = boData?.label || d.fallbackExtLabel;
+    const dailyChangePct = ((curPrice - dailyPrevClose) / dailyPrevClose) * 100;
+    const weeklyChangePct = ((curPrice - weeklyPrevClose) / weeklyPrevClose) * 100;
+
+    // Strict regular session filtering for 1D chart
+    const dayTicks = c.history.filter(h => h.t >= (c.sessionStart - 300) && h.t <= (c.sessionEnd + 300));
+    const dayHistory = dayTicks.length > 3 ? dayTicks : c.history.slice(-78);
+
+    // Multi-tier off-market detection
+    let extPrice = null;
+    let extChangePct = null;
+    let extLabel = '';
+
+    // A. Webull Blue Ocean ATS
+    if (bo && bo.price && bo.price !== curPrice) {
+      extPrice = bo.price;
+      extLabel = bo.label;
+      extChangePct = ((extPrice - curPrice) / curPrice) * 100;
+    }
+    // B. Yahoo Quote API (Official Post-Market)
+    else if (q.postMarketPrice && q.postMarketPrice > 0 && Math.abs(q.postMarketPrice - curPrice) > 0.0001) {
+      extPrice = q.postMarketPrice;
+      extLabel = 'AH';
+      extChangePct = q.postMarketChangePercent !== undefined 
+        ? q.postMarketChangePercent 
+        : ((extPrice - curPrice) / curPrice) * 100;
+    }
+    // C. Yahoo Quote API (Official Pre-Market)
+    else if (q.preMarketPrice && q.preMarketPrice > 0 && Math.abs(q.preMarketPrice - curPrice) > 0.0001) {
+      extPrice = q.preMarketPrice;
+      extLabel = 'PRE';
+      extChangePct = q.preMarketChangePercent !== undefined 
+        ? q.preMarketChangePercent 
+        : ((extPrice - curPrice) / curPrice) * 100;
+    }
+    // D. Extended candle tick fallback
+    else if (c.history.length) {
+      const lastTick = c.history[c.history.length - 1];
+      if (lastTick.t > (c.sessionEnd + 300) && Math.abs(lastTick.c - curPrice) > 0.0001) {
+        extPrice = lastTick.c;
+        extLabel = 'AH';
+        extChangePct = ((extPrice - curPrice) / curPrice) * 100;
+      }
+    }
 
     results.push({
       id: item.name,
       name: item.name,
       sub: item.sub,
       price: curPrice,
-      extPrice: (extPrice && extPrice !== curPrice) ? extPrice : null,
+      extPrice,
+      extChangePct,
       extLabel,
-      dailyPrevClose: d.dailyPrevClose,
-      weeklyPrevClose: d.weeklyPrevClose,
+      dailyPrevClose,
+      weeklyPrevClose,
       dailyChangePct,
       weeklyChangePct,
-      sessionStart: d.sessionStart,
-      sessionEnd: d.sessionEnd,
+      sessionStart: c.sessionStart,
+      sessionEnd: c.sessionEnd,
       daySeries: dayHistory,
-      weekSeries: d.history
+      weekSeries: c.history
     });
   }
 
-  // 2. Process Ratio Spreads with Blue Ocean calculation
+  // 2. Process Ratio Spreads
   for (const pair of RATIO_PAIRS) {
-    const d1 = yMap[pair.t1];
-    const d2 = yMap[pair.t2];
-    if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
+    const c1 = chartMap[pair.t1];
+    const c2 = chartMap[pair.t2];
+    if (!c1 || !c2 || !c1.history.length || !c2.history.length) continue;
 
-    const map2 = new Map(d2.history.map(h => [h.t, h.c]));
-    const matched = d1.history
-      .filter(h => map2.has(h.t))
-      .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
+    const q1 = quotesMap[pair.t1] || {};
+    const q2 = quotesMap[pair.t2] || {};
 
-    if (!matched.length) continue;
+    const p1 = q1.regularMarketPrice || c1.price;
+    const p2 = q2.regularMarketPrice || c2.price;
+    if (p2 <= 0) continue;
 
-    const curRatio = d1.price / d2.price;
-    const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
-    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+    const curRatio = p1 / p2;
+    const dailyPrevRatio = (q1.regularMarketPreviousClose || c1.dailyPrevClose) / (q2.regularMarketPreviousClose || c2.dailyPrevClose);
+    const weeklyPrevRatio = c1.weeklyPrevClose / c2.weeklyPrevClose;
 
     const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
     const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
 
-    const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
-    const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
+    const map2 = new Map(c2.history.map(h => [h.t, h.c]));
+    const matched = c1.history
+      .filter(h => map2.has(h.t))
+      .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
+
+    const sessionStart = Math.max(c1.sessionStart, c2.sessionStart);
+    const sessionEnd = Math.max(c1.sessionEnd, c2.sessionEnd);
     const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
 
-    // Compute synthetic Blue Ocean overnight spread if either asset is trading
-    const bo1 = boMap[pair.t1];
-    const bo2 = boMap[pair.t2];
-    const p1 = bo1?.price || d1.fallbackExtPrice || d1.price;
-    const p2 = bo2?.price || d2.fallbackExtPrice || d2.price;
+    // Compute synthetic off-market ratio & % difference
+    const s1 = results.find(r => r.id === pair.t1);
+    const s2 = results.find(r => r.id === pair.t2);
 
     let extRatio = null;
+    let extChangePct = null;
     let extLabel = '';
 
-    if ((bo1?.price || d1.fallbackExtPrice || bo2?.price || d2.fallbackExtPrice) && p2 > 0) {
-      const candidate = p1 / p2;
-      if (Math.abs(candidate - curRatio) > 0.0001) {
-        extRatio = candidate;
-        extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || 'EXT');
+    if (s1 && s2 && (s1.extPrice || s2.extPrice)) {
+      const activeP1 = s1.extPrice || s1.price;
+      const activeP2 = s2.extPrice || s2.price;
+      if (activeP2 > 0) {
+        extRatio = activeP1 / activeP2;
+        extChangePct = ((extRatio - curRatio) / curRatio) * 100;
+        extLabel = (s1.extLabel === 'BOATS' || s2.extLabel === 'BOATS') 
+          ? 'BOATS' 
+          : (s1.extLabel || s2.extLabel || 'EXT');
       }
     }
 
@@ -248,6 +287,7 @@ async function syncAll() {
       sub: 'Spread',
       price: curRatio,
       extPrice: extRatio,
+      extChangePct,
       extLabel,
       dailyPrevClose: dailyPrevRatio,
       weeklyPrevClose: weeklyPrevRatio,
@@ -311,6 +351,7 @@ app.get('/', (req, res) => {
       --btn-border: #23283a;
       --ext-blue: #38bdf8;
       --ext-bg: rgba(56, 189, 248, 0.12);
+      --ext-border: rgba(56, 189, 248, 0.35);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
     }
@@ -328,6 +369,7 @@ app.get('/', (req, res) => {
       --btn-border: #313542;
       --ext-blue: #38bdf8;
       --ext-bg: rgba(56, 189, 248, 0.14);
+      --ext-border: rgba(56, 189, 248, 0.35);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
     }
@@ -345,6 +387,7 @@ app.get('/', (req, res) => {
       --btn-border: #334155;
       --ext-blue: #60a5fa;
       --ext-bg: rgba(96, 165, 250, 0.14);
+      --ext-border: rgba(96, 165, 250, 0.35);
       --flash-up: rgba(16, 185, 129, 0.85);
       --flash-down: rgba(239, 68, 68, 0.85);
     }
@@ -362,6 +405,7 @@ app.get('/', (req, res) => {
       --btn-border: #dcd3bf;
       --ext-blue: #0284c7;
       --ext-bg: rgba(2, 132, 199, 0.12);
+      --ext-border: rgba(2, 132, 199, 0.3);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
     }
@@ -379,6 +423,7 @@ app.get('/', (req, res) => {
       --btn-border: #cbd5e1;
       --ext-blue: #2563eb;
       --ext-bg: rgba(37, 99, 235, 0.1);
+      --ext-border: rgba(37, 99, 235, 0.25);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
     }
@@ -460,26 +505,35 @@ app.get('/', (req, res) => {
       display: inline-block;
     }
 
-    /* Blue Ocean & Off-Market High-Visibility Badge */
+    /* Off-Market Price & Percentage Badge */
     .ext-price-badge {
       display: inline-flex;
       align-items: baseline;
-      gap: 3px;
+      gap: 4px;
       color: var(--ext-blue);
       background: var(--ext-bg);
-      border: 1px solid rgba(56, 189, 248, 0.35);
-      padding: 1px 5px;
+      border: 1px solid var(--ext-border);
+      padding: 1px 6px;
       border-radius: 4px;
-      font-size: 0.94rem;
+      font-size: 0.92rem;
       font-weight: 800;
       white-space: nowrap;
-      box-shadow: 0 0 8px rgba(56, 189, 248, 0.15);
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
+    }
+    .ext-price {
+      font-weight: 800;
+    }
+    .ext-pct {
+      font-size: 0.72rem;
+      font-weight: 700;
+      opacity: 0.95;
     }
     .ext-label {
-      font-size: 0.6rem;
+      font-size: 0.58rem;
       font-weight: 900;
-      letter-spacing: 0.5px;
-      opacity: 0.9;
+      letter-spacing: 0.4px;
+      opacity: 0.8;
+      text-transform: uppercase;
     }
 
     .badge {
@@ -582,7 +636,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot"></div> LIVE (BOATS 24H)</div>
+      <div class="status"><div class="dot"></div> LIVE (24H EXT)</div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -878,11 +932,19 @@ app.get('/', (req, res) => {
 
         const priceStr = formatNumber(item.price);
 
-        // Blue Ocean ATS / Extended Badge in electric blue
+        // Off-market Blue Badge with price, percentage difference, and session tag
         let extHtml = '';
         if (item.extPrice && item.extPrice > 0) {
           const extPriceStr = formatNumber(item.extPrice);
-          extHtml = \`<span class="ext-price-badge">\${extPriceStr} <span class="ext-label">\${item.extLabel || 'BOATS'}</span></span>\`;
+          const extSign = item.extChangePct >= 0 ? '+' : '';
+          const extPctStr = item.extChangePct !== null ? `${extSign}${item.extChangePct.toFixed(2)}%` : '';
+          extHtml = `
+            <span class="ext-price-badge">
+              <span class="ext-price">${extPriceStr}</span>
+              ${extPctStr ? `<span class="ext-pct">${extPctStr}</span>` : ''}
+              <span class="ext-label">${item.extLabel || 'EXT'}</span>
+            </span>
+          `;
         }
 
         let flashClass = '';
@@ -898,47 +960,47 @@ app.get('/', (req, res) => {
         const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
         const weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
 
-        html += \`
-          <div class="card" draggable="true" data-id="\${item.id}">
+        html += `
+          <div class="card" draggable="true" data-id="${item.id}">
             <div class="card-topbar">
               <div class="topbar-left">
                 <span class="drag-handle">⋮⋮</span>
                 <div class="reorder-btns">
-                  <button class="btn-ctrl" onclick="sendToTop('\${item.id}')" title="Top">⤒</button>
-                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', -1)" title="Up">▲</button>
-                  <button class="btn-ctrl" onclick="reorderItem('\${item.id}', 1)" title="Down">▼</button>
-                  <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
+                  <button class="btn-ctrl" onclick="sendToTop('${item.id}')" title="Top">⤒</button>
+                  <button class="btn-ctrl" onclick="reorderItem('${item.id}', -1)" title="Up">▲</button>
+                  <button class="btn-ctrl" onclick="reorderItem('${item.id}', 1)" title="Down">▼</button>
+                  <button class="btn-ctrl" onclick="sendToBottom('${item.id}')" title="Bottom">⤓</button>
                 </div>
-                <span class="sym">\${item.name}</span>
-                <span class="price-val \${flashClass}">\${priceStr}</span>
-                \${extHtml}
-                <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
-                <span class="sub">\${item.sub}</span>
+                <span class="sym">${item.name}</span>
+                <span class="price-val ${flashClass}">${priceStr}</span>
+                ${extHtml}
+                <span class="badge ${dayBadge}">${daySign}${item.dailyChangePct.toFixed(2)}%</span>
+                <span class="sub">${item.sub}</span>
               </div>
               <div class="topbar-right">
-                <span id="\${daySvgId}-readout" class="scrub-readout"></span>
-                <button class="week-pill \${isWeekOpen ? 'active' : ''}" onclick="toggleWeek('\${item.id}')">1W</button>
+                <span id="${daySvgId}-readout" class="scrub-readout"></span>
+                <button class="week-pill ${isWeekOpen ? 'active' : ''}" onclick="toggleWeek('${item.id}')">1W</button>
               </div>
             </div>
 
             <div class="chart-box">
-              <div class="svg-wrap">\${daySvg}</div>
+              <div class="svg-wrap">${daySvg}</div>
             </div>
 
-            <div class="week-drawer \${isWeekOpen ? 'open' : ''}">
+            <div class="week-drawer ${isWeekOpen ? 'open' : ''}">
               <div class="week-drawer-hdr">
                 <div style="display:flex; align-items:center; gap:6px;">
-                  <span class="badge \${weekBadge}">\${weekSign}\${item.weeklyChangePct.toFixed(2)}%</span>
+                  <span class="badge ${weekBadge}">${weekSign}${item.weeklyChangePct.toFixed(2)}%</span>
                   <span class="sub">5D Trend</span>
                 </div>
-                <span id="\${weekSvgId}-readout" class="scrub-readout"></span>
+                <span id="${weekSvgId}-readout" class="scrub-readout"></span>
               </div>
               <div class="chart-box">
-                <div class="svg-wrap">\${weekSvg}</div>
+                <div class="svg-wrap">${weekSvg}</div>
               </div>
             </div>
           </div>
-        \`;
+        `;
       });
 
       container.innerHTML = html;
