@@ -41,14 +41,12 @@ async function fetchTicker(symbol) {
   const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
   try {
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const t = setTimeout(() => ctrl.abort(), 3000);
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-      }
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
     });
-    clearTimeout(timer);
+    clearTimeout(t);
     if (!res.ok) return null;
 
     const json = await res.json();
@@ -128,11 +126,21 @@ async function updateMarketData() {
     }
 
     list.push({
-      id: item.name, name: item.name, sub: item.sub,
-      price: cur, extPrice: extPct !== null ? d.extPrice : null, extPct, extLabel: d.extLabel,
-      dailyPrev: d.dailyPrevClose, weeklyPrev: d.weeklyPrevClose,
-      dayPct, weekPct, sStart: d.sStart, sEnd: d.sEnd,
-      daySeries: dayHistory, weekSeries: d.history
+      id: item.name,
+      name: item.name,
+      sub: item.sub,
+      price: cur,
+      extPrice: extPct !== null ? d.extPrice : null,
+      extPct,
+      extLabel: d.extLabel,
+      dailyPrev: d.dailyPrevClose,
+      weeklyPrev: d.weeklyPrevClose,
+      dayPct,
+      weekPct,
+      sStart: d.sStart,
+      sEnd: d.sEnd,
+      daySeries: dayHistory,
+      weekSeries: d.history
     });
   }
 
@@ -173,11 +181,21 @@ async function updateMarketData() {
     }
 
     list.push({
-      id: pair.t1 + '/' + pair.t2, name: pair.t1 + '/' + pair.t2, sub: 'Spread',
-      price: curRatio, extPrice: extRatio, extPct, extLabel,
-      dailyPrev: dailyPrevRatio, weeklyPrev: weeklyPrevRatio,
-      dayPct, weekPct, sStart, sEnd,
-      daySeries: dayHistory, weekSeries: matched
+      id: pair.t1 + '/' + pair.t2,
+      name: pair.t1 + '/' + pair.t2,
+      sub: 'Spread',
+      price: curRatio,
+      extPrice: extRatio,
+      extPct,
+      extLabel,
+      dailyPrev: dailyPrevRatio,
+      weeklyPrev: weeklyPrevRatio,
+      dayPct,
+      weekPct,
+      sStart,
+      sEnd,
+      daySeries: dayHistory,
+      weekSeries: matched
     });
   }
 
@@ -187,11 +205,9 @@ async function updateMarketData() {
   }
 }
 
-// Background sync loop
 updateMarketData();
 setInterval(updateMarketData, 3000);
 
-// Fast non-blocking endpoint (returns immediately from memory)
 app.get('/api/data', (req, res) => {
   res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
 });
@@ -266,8 +282,6 @@ app.get('/', (req, res) => {
     .watchlist { margin-top: 8px; }
     .watchlist.card-view { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
     .watchlist.list-view { display: flex; flex-direction: column; gap: 8px; }
-
-    .notice { text-align: center; padding: 60px 16px; color: var(--text-sub); font-size: 0.9rem; font-weight: 600; }
 
     .card {
       background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
@@ -378,7 +392,7 @@ app.get('/', (req, res) => {
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
     var previousPrices = {};
-    var latestData = JSON.parse(localStorage.getItem('cached_ratios') || '{}');
+    var latestData = {};
     var openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     var allWeekOpen = false;
     window.CHART_STORE = {};
@@ -724,27 +738,15 @@ app.get('/', (req, res) => {
       try {
         var res = await fetch('/api/data');
         var json = await res.json();
-        var dot = document.getElementById('liveDot');
-        var txt = document.getElementById('statusTxt');
-
         if (json.items && json.items.length) {
           json.items.forEach(function(i) { latestData[i.id] = i; });
-          localStorage.setItem('cached_ratios', JSON.stringify(latestData));
           renderList(false);
-          dot.className = 'dot';
-          txt.textContent = 'CONNECTED (' + json.items.length + ')';
         }
-      } catch (e) {
-        var dot = document.getElementById('liveDot');
-        var txt = document.getElementById('statusTxt');
-        dot.className = 'dot syncing';
-        txt.textContent = 'CONNECTING';
-      }
+      } catch (e) {}
     }
 
-    renderList(true);
     poll();
-    setInterval(poll, 2500);
+    setInterval(poll, 2000);
   </script>
 </body>
 </html>`);
