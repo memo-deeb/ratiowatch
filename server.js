@@ -3,21 +3,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BASE_SYMBOLS = [
-  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude', isStock: false },
-  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isStock: false },
-  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isStock: false },
-  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / USD', isStock: false },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true, wid: '913253396' },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings', isStock: true, wid: '913254556' },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true, wid: '913444436' },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group', isStock: true, wid: '913255280' },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true, wid: null },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corp', isStock: true, wid: '913254287' },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital', isStock: true, wid: '913444211' },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Tech', isStock: true, wid: '913446973' },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer', isStock: true, wid: '913254245' },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings', isStock: true, wid: '913255167' },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true, wid: '913255146' }
+  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude' },
+  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold' },
+  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver' },
+  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / USD' },
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc' },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings' },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED' },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group' },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.' },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corp' },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital' },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Tech' },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer' },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings' },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.' }
 ];
 
 const RATIO_PAIRS = [
@@ -33,66 +33,23 @@ const RATIO_PAIRS = [
   { t1: 'IREN', t2: 'WULF' }
 ];
 
-let CACHED_PAYLOAD = [];
+let CACHED_DATA = [];
 let LAST_UPDATE = 0;
-let LAST_ERROR = '';
 const RAW_CACHE = {};
-const BO_CACHE = {};
 
-// Session State for Cookie & Crumb
-let YAHOO_COOKIE = '';
-let YAHOO_CRUMB = '';
-
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
-
-// 1. Automatic Handshake: Obtains Session Cookie & Crumb to bypass Datacenter WAF
-async function initYahooSession() {
-  try {
-    const cookieRes = await fetch('https://fc.yahoo.com', {
-      headers: { 'User-Agent': UA }
-    });
-    const setCookie = cookieRes.headers.get('set-cookie');
-    if (setCookie) {
-      YAHOO_COOKIE = setCookie.split(';')[0];
-    }
-
-    const crumbUrl = 'https://query1.finance.yahoo.com/v1/test/getcrumb';
-    const crumbRes = await fetch(crumbUrl, {
-      headers: {
-        'User-Agent': UA,
-        'Cookie': YAHOO_COOKIE
-      }
-    });
-    if (crumbRes.ok) {
-      YAHOO_CRUMB = await crumbRes.text();
-      console.log('Yahoo session established. Crumb:', YAHOO_CRUMB);
-    }
-  } catch (e) {
-    console.error('Session handshake warning:', e.message);
-  }
-}
-
-// 2. Fetch Chart Candles with Crumb Authentication
-async function fetchChart(symbol) {
-  let url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
-  if (YAHOO_CRUMB) url += '&crumb=' + encodeURIComponent(YAHOO_CRUMB);
-
-  const headers = { 'User-Agent': UA };
-  if (YAHOO_COOKIE) headers['Cookie'] = YAHOO_COOKIE;
-
+async function fetchTicker(symbol) {
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 4000);
-    const res = await fetch(url, { signal: ctrl.signal, headers });
-    clearTimeout(t);
-
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        // Crumb expired or required, trigger re-authentication
-        initYahooSession();
+    const timer = setTimeout(() => ctrl.abort(), 2500);
+    const res = await fetch(url, {
+      signal: ctrl.signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
       }
-      return null;
-    }
+    });
+    clearTimeout(timer);
+    if (!res.ok) return null;
 
     const json = await res.json();
     const r = json.chart?.result?.[0];
@@ -146,39 +103,9 @@ async function fetchChart(symbol) {
   }
 }
 
-// 3. Isolated Webull BOATS Fetcher
-async function fetchWebull(wid) {
-  if (!wid) return null;
-  try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2000);
-    const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
-    const res = await fetch(url, {
-      signal: ctrl.signal,
-      headers: { 'User-Agent': UA, 'hl': 'en', 'gl': 'us', 'platform': 'pc' }
-    });
-    clearTimeout(t);
-    if (!res.ok) return null;
-    const d = await res.json();
-    if (d.nightPrice && parseFloat(d.nightPrice) > 0) return { price: parseFloat(d.nightPrice), label: 'BOATS' };
-    if (d.pPrice && parseFloat(d.pPrice) > 0) return { price: parseFloat(d.pPrice), label: d.status === 'P' ? 'PRE' : 'AH' };
-  } catch (e) {}
-  return null;
-}
-
-async function webullWorker() {
-  const stockItems = BASE_SYMBOLS.filter(s => s.isStock && s.wid);
-  for (const item of stockItems) {
-    const data = await fetchWebull(item.wid);
-    if (data) BO_CACHE[item.sym] = data;
-  }
-  setTimeout(webullWorker, 8000);
-}
-webullWorker();
-
-async function buildPayload() {
+async function updateMarketData() {
   await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
-    const d = await fetchChart(item.sym);
+    const d = await fetchTicker(item.sym);
     if (d) RAW_CACHE[item.sym] = d;
   }));
 
@@ -195,17 +122,14 @@ async function buildPayload() {
     const dayTicks = d.history.filter(h => h.t >= (d.sStart - 300) && h.t <= (d.sEnd + 300));
     const dayHistory = dayTicks.length > 2 ? dayTicks : d.history.slice(-30);
 
-    const bo = BO_CACHE[item.sym];
-    const extP = bo ? bo.price : d.extPrice;
-    const extL = bo ? bo.label : d.extLabel;
     let extPct = null;
-    if (extP && extP > 0 && Math.abs(extP - cur) > 0.0001) {
-      extPct = ((extP - cur) / cur) * 100;
+    if (d.extPrice && d.extPrice > 0 && Math.abs(d.extPrice - cur) > 0.0001) {
+      extPct = ((d.extPrice - cur) / cur) * 100;
     }
 
     list.push({
       id: item.name, name: item.name, sub: item.sub,
-      price: cur, extPrice: extPct !== null ? extP : null, extPct, extLabel: extL,
+      price: cur, extPrice: extPct !== null ? d.extPrice : null, extPct, extLabel: d.extLabel,
       dailyPrev: d.dailyPrevClose, weeklyPrev: d.weeklyPrevClose,
       dayPct, weekPct, sStart: d.sStart, sEnd: d.sEnd,
       daySeries: dayHistory, weekSeries: d.history
@@ -232,21 +156,19 @@ async function buildPayload() {
     const dayTicks = matched.filter(m => m.t >= (sStart - 300) && m.t <= (sEnd + 300));
     const dayHistory = dayTicks.length > 2 ? dayTicks : matched.slice(-30);
 
-    const bo1 = BO_CACHE[pair.t1];
-    const bo2 = BO_CACHE[pair.t2];
-    const p1 = (bo1 ? bo1.price : d1.extPrice) || d1.price;
-    const p2 = (bo2 ? bo2.price : d2.extPrice) || d2.price;
+    const p1 = d1.extPrice || d1.price;
+    const p2 = d2.extPrice || d2.price;
 
     let extRatio = null;
     let extPct = null;
     let extLabel = '';
 
-    if ((bo1 || d1.extPrice || bo2 || d2.extPrice) && p2 > 0) {
+    if ((d1.extPrice || d2.extPrice) && p2 > 0) {
       const candidate = p1 / p2;
       if (Math.abs(candidate - curRatio) > 0.0001) {
         extRatio = candidate;
         extPct = ((extRatio - curRatio) / curRatio) * 100;
-        extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || d1.extLabel || d2.extLabel || 'EXT');
+        extLabel = d1.extLabel || d2.extLabel || 'EXT';
       }
     }
 
@@ -260,27 +182,18 @@ async function buildPayload() {
   }
 
   if (list.length > 0) {
-    CACHED_PAYLOAD = list;
+    CACHED_DATA = list;
     LAST_UPDATE = Date.now();
-    LAST_ERROR = '';
-  } else {
-    LAST_ERROR = 'Yahoo data endpoint temporarily busy. Retrying...';
   }
 }
 
-async function loop() {
-  await buildPayload();
-  setTimeout(loop, 2500);
-}
+// Background sync loop
+updateMarketData();
+setInterval(updateMarketData, 3000);
 
-// Initialize session then start worker
-initYahooSession().then(() => loop());
-
-app.get('/api/data', async (req, res) => {
-  if (!CACHED_PAYLOAD.length) {
-    await buildPayload();
-  }
-  res.json({ updated: LAST_UPDATE, error: LAST_ERROR, items: CACHED_PAYLOAD });
+// Fast non-blocking endpoint (returns immediately from memory)
+app.get('/api/data', (req, res) => {
+  res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -445,7 +358,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">SYNCING</span></div>
+      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">CONNECTED</span></div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -460,9 +373,7 @@ app.get('/', (req, res) => {
     </div>
   </header>
 
-  <div class="watchlist card-view" id="watchlist">
-    <div class="notice" id="loadingNotice">Establishing connection with exchange feeds...</div>
-  </div>
+  <div class="watchlist card-view" id="watchlist"></div>
 
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
@@ -821,12 +732,7 @@ app.get('/', (req, res) => {
           localStorage.setItem('cached_ratios', JSON.stringify(latestData));
           renderList(false);
           dot.className = 'dot';
-          txt.textContent = 'LIVE (' + json.items.length + ')';
-        } else if (json.error) {
-          dot.className = 'dot syncing';
-          txt.textContent = 'SYNCING';
-          var notice = document.getElementById('loadingNotice');
-          if (notice) notice.textContent = json.error;
+          txt.textContent = 'CONNECTED (' + json.items.length + ')';
         }
       } catch (e) {
         var dot = document.getElementById('liveDot');
