@@ -3,21 +3,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BASE_SYMBOLS = [
-  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil' },
-  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold' },
-  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver' },
-  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar' },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc' },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.' },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED' },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.' },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.' },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation' },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.' },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group' },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.' },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.' },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.' }
+  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil', isCrypto: false, isCommodity: true },
+  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isCrypto: false, isCommodity: true },
+  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isCrypto: false, isCommodity: true },
+  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar', isCrypto: true, isCommodity: false },
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isCrypto: false, isCommodity: false },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isCrypto: false, isCommodity: false },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isCrypto: false, isCommodity: false },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isCrypto: false, isCommodity: false },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isCrypto: false, isCommodity: false },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isCrypto: false, isCommodity: false },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isCrypto: false, isCommodity: false },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isCrypto: false, isCommodity: false },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isCrypto: false, isCommodity: false },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isCrypto: false, isCommodity: false },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isCrypto: false, isCommodity: false }
 ];
 
 const RATIO_PAIRS = [
@@ -36,42 +36,26 @@ const RATIO_PAIRS = [
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
 
-function get24HourBounds() {
-  const now = new Date();
-  const etStr = now.toLocaleString('en-US', { timeZone: 'America/New_York' });
-  const etDate = new Date(etStr);
-  const etHour = etDate.getHours();
-  const etMin = etDate.getMinutes();
-
-  // If before 20:00 ET, cycle started yesterday at 20:00 ET
-  // If 20:00 ET or later, cycle started today at 20:00 ET
-  const cycleStartET = new Date(etDate);
-  if (etHour < 20) {
-    cycleStartET.setDate(cycleStartET.getDate() - 1);
-  }
-  cycleStartET.setHours(20, 0, 0, 0);
-
-  const startUtc = Math.floor(new Date(cycleStartET.toLocaleString('en-US', { timeZone: 'America/New_York' })).getTime() / 1000);
-  const endUtc = startUtc + 86400; // +24 hours
-  const preStart = startUtc + 28800; // +8h (04:00 ET)
-  const regStart = startUtc + 48600; // +13.5h (09:30 ET)
-  const regEnd = startUtc + 72000;   // +20h (16:00 ET)
-
-  let state = 'REG';
-  const timeFraction = etHour + etMin / 60;
-  if (timeFraction >= 4.0 && timeFraction < 9.5) state = 'PRE';
-  else if (timeFraction >= 9.5 && timeFraction < 16.0) state = 'REG';
-  else if (timeFraction >= 16.0 && timeFraction < 20.0) state = 'POST';
-  else state = 'OVERNIGHT';
-
-  return { startUtc, endUtc, preStart, regStart, regEnd, state };
+// Filters ticks strictly to regular cash session (09:30 - 16:00 ET)
+function isRegularUsTick(ts) {
+  const d = new Date(ts * 1000);
+  const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
+  const et = new Date(etStr);
+  const day = et.getDay();
+  if (day === 0 || day === 6) return false;
+  const mins = et.getHours() * 60 + et.getMinutes();
+  return mins >= (9 * 60 + 30) && mins <= (16 * 60);
 }
 
-async function fetchTicker(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true`;
+async function fetchTicker(item) {
+  const symbol = item.sym;
+  // Cache-busting URL parameter ensures fresh quotes from Yahoo CDN
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true&nocache=${Date.now()}`;
   const res = await fetch(url, {
     headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Pragma': 'no-cache'
     }
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -81,45 +65,64 @@ async function fetchTicker(symbol) {
   const times = r.timestamp || [];
   const quotes = r.indicators.quote[0].close || [];
 
-  const history = [];
+  const rawHistory = [];
   for (let i = 0; i < times.length; i++) {
     if (quotes[i] !== null && quotes[i] !== undefined) {
-      history.push({ t: times[i], c: quotes[i] });
+      rawHistory.push({ t: times[i], c: quotes[i] });
     }
   }
 
-  const { startUtc, endUtc, preStart, regStart, regEnd, state } = get24HourBounds();
-  const lastTick = history.length ? history[history.length - 1] : null;
+  // 1. Regular market calculations only
+  const regPrice = meta.regularMarketPrice || (rawHistory.length ? rawHistory[rawHistory.length - 1].c : 0);
+  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (rawHistory.length ? rawHistory[0].c : 1);
+  const weeklyPrevClose = meta.chartPreviousClose || (rawHistory.length ? rawHistory[0].c : 1);
 
-  let curPrice = meta.regularMarketPrice || (lastTick ? lastTick.c : 0);
-  let sessionState = state;
+  // 2. Off-market (extended) price detection
+  let extPrice = null;
+  const lastTick = rawHistory.length ? rawHistory[rawHistory.length - 1] : null;
 
-  if (symbol.includes('BTC')) {
-    sessionState = '24/7';
-    if (lastTick) curPrice = lastTick.c;
-  } else if (sessionState === 'PRE' && meta.preMarketPrice) {
-    curPrice = meta.preMarketPrice;
-  } else if (sessionState === 'POST' && meta.postMarketPrice) {
-    curPrice = meta.postMarketPrice;
-  } else if (sessionState === 'OVERNIGHT' && lastTick) {
-    curPrice = lastTick.c;
+  if (meta.postMarketPrice && Math.abs(meta.postMarketPrice - regPrice) > 0.0001) {
+    extPrice = meta.postMarketPrice;
+  } else if (meta.preMarketPrice && Math.abs(meta.preMarketPrice - regPrice) > 0.0001) {
+    extPrice = meta.preMarketPrice;
+  } else if (lastTick && !item.isCrypto && !item.isCommodity) {
+    if (!isRegularUsTick(lastTick.t) && Math.abs(lastTick.c - regPrice) > 0.0001) {
+      extPrice = lastTick.c;
+    }
   }
 
-  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
-  const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
+  // 3. Strictly isolate regular ticks for charts (no pre/post/overnight in candles)
+  let regHistory = rawHistory;
+  if (!item.isCrypto && !item.isCommodity) {
+    regHistory = rawHistory.filter(h => isRegularUsTick(h.t));
+  }
+
+  // Determine latest regular day boundary
+  let daySeries = [];
+  let sStart = 0;
+  let sEnd = 0;
+
+  if (regHistory.length > 0) {
+    const lastRegT = regHistory[regHistory.length - 1].t;
+    const lastDateStr = new Date(lastRegT * 1000).toDateString();
+    daySeries = regHistory.filter(h => new Date(h.t * 1000).toDateString() === lastDateStr);
+
+    if (daySeries.length > 0) {
+      sStart = daySeries[0].t;
+      sEnd = sStart + 23400; // Standard 6.5h regular session (09:30 - 16:00 ET)
+    }
+  }
 
   return {
     symbol,
-    price: curPrice,
+    price: regPrice,
+    extPrice,
     dailyPrevClose,
     weeklyPrevClose,
-    sessionStart: startUtc,
-    sessionEnd: endUtc,
-    preStart,
-    regStart,
-    regEnd,
-    sessionState,
-    history
+    sessionStart: sStart,
+    sessionEnd: sEnd,
+    daySeries,
+    weekSeries: regHistory
   };
 }
 
@@ -128,7 +131,7 @@ async function syncAll() {
   await Promise.allSettled(
     BASE_SYMBOLS.map(async (item) => {
       try {
-        map[item.sym] = await fetchTicker(item.sym);
+        map[item.name] = await fetchTicker(item);
       } catch (e) {
         console.error(`Error loading ${item.sym}:`, e.message);
       }
@@ -137,65 +140,73 @@ async function syncAll() {
 
   const results = [];
 
+  // Base assets
   for (const item of BASE_SYMBOLS) {
-    const d = map[item.sym];
-    if (!d || !d.history.length) continue;
+    const d = map[item.name];
+    if (!d || !d.daySeries.length) continue;
 
-    const curPrice = d.price;
-    const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
-    const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
+    const dailyChangePct = ((d.price - d.dailyPrevClose) / d.dailyPrevClose) * 100;
+    const weeklyChangePct = ((d.price - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
-    // Filter all ticks belonging to the current 24-hour cycle
-    const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-288);
+    let extChangePct = null;
+    if (d.extPrice && d.price > 0) {
+      extChangePct = ((d.extPrice - d.price) / d.price) * 100;
+    }
 
     results.push({
       id: item.name,
       name: item.name,
       sub: item.sub,
-      price: curPrice,
+      price: d.price,
+      extPrice: d.extPrice,
+      extChangePct,
       dailyPrevClose: d.dailyPrevClose,
       weeklyPrevClose: d.weeklyPrevClose,
       dailyChangePct,
       weeklyChangePct,
       sessionStart: d.sessionStart,
       sessionEnd: d.sessionEnd,
-      regStart: d.regStart,
-      regEnd: d.regEnd,
-      preStart: d.preStart,
-      sessionState: d.sessionState,
-      daySeries: dayHistory,
-      weekSeries: d.history
+      daySeries: d.daySeries,
+      weekSeries: d.weekSeries
     });
   }
 
+  // Ratios (Pure regular session calculations)
   for (const pair of RATIO_PAIRS) {
     const d1 = map[pair.t1];
     const d2 = map[pair.t2];
-    if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
+    if (!d1 || !d2 || !d1.daySeries.length || !d2.daySeries.length) continue;
 
-    const map2 = new Map(d2.history.map(h => [h.t, h.c]));
-    const matched = d1.history
+    // Regular ratio
+    const curRatio = d1.price / d2.price;
+    const prevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
+    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+
+    const dailyChangePct = ((curRatio - prevRatio) / prevRatio) * 100;
+    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
+
+    // Extended ratio (only if either stock has an active off-market price)
+    let extRatio = null;
+    let extRatioPct = null;
+    if (d1.extPrice || d2.extPrice) {
+      const p1 = d1.extPrice || d1.price;
+      const p2 = d2.extPrice || d2.price;
+      if (p2 > 0) {
+        extRatio = p1 / p2;
+        extRatioPct = ((extRatio - curRatio) / curRatio) * 100;
+      }
+    }
+
+    // Match regular intraday ticks for ratio chart
+    const map2 = new Map(d2.daySeries.map(h => [h.t, h.c]));
+    const matchedDay = d1.daySeries
       .filter(h => map2.has(h.t))
       .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
 
-    if (!matched.length) continue;
-
-    const curRatio = matched[matched.length - 1].c;
-    const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
-    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
-
-    const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
-    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
-
-    const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
-    const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
-    const regStart = Math.max(d1.regStart, d2.regStart);
-    const regEnd = Math.max(d1.regEnd, d2.regEnd);
-    const preStart = Math.max(d1.preStart, d2.preStart);
-
-    const dayTicks = matched.filter(m => m.t >= (sessionStart - 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-288);
+    const map2Week = new Map(d2.weekSeries.map(h => [h.t, h.c]));
+    const matchedWeek = d1.weekSeries
+      .filter(h => map2Week.has(h.t))
+      .map(h => ({ t: h.t, c: h.c / map2Week.get(h.t) }));
 
     const id = `${pair.t1}/${pair.t2}`;
     results.push({
@@ -203,18 +214,16 @@ async function syncAll() {
       name: id,
       sub: 'Spread',
       price: curRatio,
-      dailyPrevClose: dailyPrevRatio,
+      extPrice: extRatio,
+      extChangePct: extRatioPct,
+      dailyPrevClose: prevRatio,
       weeklyPrevClose: weeklyPrevRatio,
       dailyChangePct,
       weeklyChangePct,
-      sessionStart,
-      sessionEnd,
-      regStart,
-      regEnd,
-      preStart,
-      sessionState: d1.sessionState,
-      daySeries: dayHistory,
-      weekSeries: matched
+      sessionStart: Math.max(d1.sessionStart, d2.sessionStart),
+      sessionEnd: Math.max(d1.sessionEnd, d2.sessionEnd),
+      daySeries: matchedDay.length ? matchedDay : d1.daySeries,
+      weekSeries: matchedWeek.length ? matchedWeek : d1.weekSeries
     });
   }
 
@@ -224,11 +233,17 @@ async function syncAll() {
   }
 }
 
+// Low-latency polling every 2.5 seconds
 syncAll();
-setInterval(syncAll, 3000);
+setInterval(syncAll, 2500);
 
+// API endpoint with aggressive anti-cache headers
 app.get('/api/data', (req, res) => {
-  res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+  res.json({ updated: LAST_UPDATE, serverTime: Date.now(), items: CACHED_DATA });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -265,9 +280,10 @@ app.get('/', (req, res) => {
       --axis: #525974;
       --grid: #151822;
       --base: #373e54;
-      --reg-zone: rgba(255, 255, 255, 0.02);
       --btn-bg: #141722;
       --btn-border: #23283a;
+      --blue-ext: #38bdf8;
+      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
     }
@@ -281,9 +297,10 @@ app.get('/', (req, res) => {
       --axis: #6e768b;
       --grid: #22242c;
       --base: #42495d;
-      --reg-zone: rgba(255, 255, 255, 0.025);
       --btn-bg: #22242c;
       --btn-border: #313542;
+      --blue-ext: #38bdf8;
+      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
     }
@@ -297,9 +314,10 @@ app.get('/', (req, res) => {
       --axis: #64748b;
       --grid: #1e293b;
       --base: #3b4252;
-      --reg-zone: rgba(255, 255, 255, 0.025);
       --btn-bg: #1e293b;
       --btn-border: #334155;
+      --blue-ext: #38bdf8;
+      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(16, 185, 129, 0.85);
       --flash-down: rgba(239, 68, 68, 0.85);
     }
@@ -313,9 +331,10 @@ app.get('/', (req, res) => {
       --axis: #8b92a2;
       --grid: #eae4d7;
       --base: #b4bccb;
-      --reg-zone: rgba(0, 0, 0, 0.02);
       --btn-bg: #ebe5d8;
       --btn-border: #dcd3bf;
+      --blue-ext: #0284c7;
+      --blue-ext-bg: rgba(2, 132, 199, 0.15);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
     }
@@ -329,9 +348,10 @@ app.get('/', (req, res) => {
       --axis: #94a3b8;
       --grid: #e2e8f0;
       --base: #cbd5e1;
-      --reg-zone: rgba(0, 0, 0, 0.025);
       --btn-bg: #e2e8f0;
       --btn-border: #cbd5e1;
+      --blue-ext: #0284c7;
+      --blue-ext-bg: rgba(2, 132, 199, 0.15);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
     }
@@ -344,6 +364,7 @@ app.get('/', (req, res) => {
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
     .dot { width: 7px; height: 7px; background: #00c805; border-radius: 50%; box-shadow: 0 0 6px #00c805; }
+    .live-age { color: var(--text-sub); font-weight: 500; font-size: 0.68rem; margin-left: 2px; }
 
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .action-btn, select.theme-select {
@@ -404,6 +425,8 @@ app.get('/', (req, res) => {
     .btn-ctrl:active { background: #00c805; color: #000; }
 
     .sym { font-size: 0.95rem; font-weight: 800; white-space: nowrap; }
+
+    /* Original regular price */
     .price-val {
       font-size: 1.12rem;
       font-weight: 800;
@@ -415,23 +438,33 @@ app.get('/', (req, res) => {
     .badge {
       font-size: 0.75rem;
       font-weight: 800;
-      padding: 2px 6px;
+      padding: 2px 5px;
       border-radius: 4px;
       white-space: nowrap;
     }
 
-    /* Distinct Session Badges */
-    .state-badge {
-      font-size: 0.62rem;
+    /* Off-market blue price style (No labels) */
+    .ext-block {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 2px;
+    }
+    .ext-price-val {
+      color: var(--blue-ext);
+      font-size: 0.95rem;
       font-weight: 800;
-      padding: 1px 5px;
-      border-radius: 3px;
-      letter-spacing: 0.5px;
       white-space: nowrap;
     }
-    .state-on { background: rgba(0, 180, 255, 0.18); color: #00c8ff; border: 1px solid rgba(0, 180, 255, 0.4); }
-    .state-pre { background: rgba(255, 165, 0, 0.18); color: #ffa500; border: 1px solid rgba(255, 165, 0, 0.4); }
-    .state-post { background: rgba(186, 85, 211, 0.18); color: #ba55d3; border: 1px solid rgba(186, 85, 211, 0.4); }
+    .ext-badge {
+      background: var(--blue-ext-bg);
+      color: var(--blue-ext);
+      font-size: 0.68rem;
+      font-weight: 800;
+      padding: 1px 4px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
 
     .sub {
       font-size: 0.68rem;
@@ -473,6 +506,7 @@ app.get('/', (req, res) => {
     .flash-up { animation: flashGreen 1.4s ease-out; }
     .flash-down { animation: flashRed 1.4s ease-out; }
 
+    /* Chart Canvas strictly regular session */
     .chart-box {
       width: 100%;
       background: var(--chart-bg);
@@ -488,8 +522,6 @@ app.get('/', (req, res) => {
     .grid-line { stroke: var(--grid); stroke-width: 1; }
     .base-line { stroke: var(--base); stroke-dasharray: 3,3; stroke-width: 1.2; }
     .day-divider { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2,2; }
-    .session-divider { stroke: #3a4154; stroke-width: 1; stroke-dasharray: 2,2; }
-    .reg-zone-rect { fill: var(--reg-zone); }
 
     .chart-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
     .chart-area { stroke: none; opacity: 0.12; }
@@ -529,7 +561,9 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot"></div> LIVE</div>
+      <div class="status">
+        <div class="dot"></div> LIVE <span id="liveAge" class="live-age"></span>
+      </div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -552,6 +586,14 @@ app.get('/', (req, res) => {
     let latestData = {};
     let openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     let allWeekOpen = false;
+    let lastDataTime = Date.now();
+
+    // Timer indicating how many seconds ago data refreshed
+    setInterval(() => {
+      const sec = Math.round((Date.now() - lastDataTime) / 1000);
+      const el = document.getElementById('liveAge');
+      if (el) el.textContent = '• ' + sec + 's ago';
+    }, 1000);
 
     let currentView = localStorage.getItem('rw_view') || 'card';
     applyViewMode(currentView);
@@ -591,19 +633,20 @@ app.get('/', (req, res) => {
       return new Date(ts * 1000).toLocaleDateString([], { weekday: 'short' });
     }
 
-    function buildSvg(id, series, baselineVal, isDay, sStart, sEnd, regStart, regEnd, preStart) {
+    function buildSvg(id, series, baselineVal, isDay, sStart, sEnd) {
       if (!series || series.length < 2) return '';
       const w = 440, h = 130;
       const padTop = 10, padBtm = 20, padLeft = 6, padRight = 55;
-      const ch = h - padTop - padBtm; // 100
-      const cw = w - padLeft - padRight; // 379
+      const ch = h - padTop - padBtm;
+      const cw = w - padLeft - padRight;
 
       const vals = series.map(s => s.c);
       const min = Math.min(...vals);
       const max = Math.max(...vals);
       const range = max === min ? 1 : max - min;
 
-      const sessionDuration = 86400; // Full 24-hour cycle
+      // Regular cash session span: 6.5 hours (23400s)
+      const sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
 
       const pts = series.map((s, i) => {
         let xFrac;
@@ -630,21 +673,6 @@ app.get('/', (req, res) => {
       if (baselineVal && baselineVal >= min && baselineVal <= max) {
         const by = padTop + ch - ((baselineVal - min) / range) * ch;
         baseSvg = '<line class="base-line" x1="' + padLeft + '" y1="' + by.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + by.toFixed(1) + '" />';
-      }
-
-      // Shaded Regular Cash Session (09:30 - 16:00 ET)
-      let sessionZoneSvg = '';
-      if (isDay && sStart && regStart && regEnd) {
-        const rx1 = padLeft + Math.max(0, Math.min(1, (regStart - sStart) / sessionDuration)) * cw;
-        const rx2 = padLeft + Math.max(0, Math.min(1, (regEnd - sStart) / sessionDuration)) * cw;
-        const px1 = preStart ? (padLeft + Math.max(0, Math.min(1, (preStart - sStart) / sessionDuration)) * cw) : rx1;
-
-        sessionZoneSvg = \`
-          <line class="session-divider" x1="\${px1.toFixed(1)}" y1="\${padTop}" x2="\${px1.toFixed(1)}" y2="\${padTop + ch}" />
-          <rect class="reg-zone-rect" x="\${rx1.toFixed(1)}" y="\${padTop}" width="\${(rx2 - rx1).toFixed(1)}" height="\${ch}" />
-          <line class="session-divider" x1="\${rx1.toFixed(1)}" y1="\${padTop}" x2="\${rx1.toFixed(1)}" y2="\${padTop + ch}" />
-          <line class="session-divider" x1="\${rx2.toFixed(1)}" y1="\${padTop}" x2="\${rx2.toFixed(1)}" y2="\${padTop + ch}" />
-        \`;
       }
 
       let dayMarkersSvg = '';
@@ -676,10 +704,10 @@ app.get('/', (req, res) => {
       const fmtY = v => v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
 
       let xStart, xMid, xEnd;
-      if (isDay && sStart) {
+      if (isDay && sStart && sEnd) {
         xStart = formatTime(sStart);
-        xMid = formatTime(sStart + 43200);
-        xEnd = formatTime(sStart + 86400);
+        xMid = formatTime(sStart + sessionDuration / 2);
+        xEnd = formatTime(sEnd);
       } else {
         xStart = formatDay(series[0].t);
         xMid = formatDay(series[Math.floor(series.length / 2)].t);
@@ -693,7 +721,6 @@ app.get('/', (req, res) => {
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop}" x2="\${padLeft + cw}" y2="\${padTop}" />
           <line class="grid-line" x1="\${padLeft}" y1="\${midY.toFixed(1)}" x2="\${padLeft + cw}" y2="\${midY.toFixed(1)}" />
           <line class="grid-line" x1="\${padLeft}" y1="\${padTop + ch}" x2="\${padLeft + cw}" y2="\${padTop + ch}" />
-          \${sessionZoneSvg}
           \${baseSvg}
           \${dayMarkersSvg}
 
@@ -839,26 +866,31 @@ app.get('/', (req, res) => {
         const priceStr = item.price >= 1000 ? item.price.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
                          item.price >= 10 ? item.price.toFixed(2) : item.price.toFixed(4);
 
+        // Off-market price in blue (No labels)
+        let extHtml = '';
+        if (item.extPrice && Math.abs(item.extPrice - item.price) > 0.0001) {
+          const extStr = item.extPrice >= 1000 ? item.extPrice.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
+                         item.extPrice >= 10 ? item.extPrice.toFixed(2) : item.extPrice.toFixed(4);
+          const extSign = item.extChangePct >= 0 ? '+' : '';
+          extHtml = \`
+            <div class="ext-block">
+              <span class="ext-price-val">\${extStr}</span>
+              <span class="ext-badge">\${extSign}\${item.extChangePct.toFixed(2)}%</span>
+            </div>
+          \`;
+        }
+
         let flashClass = '';
         if (previousPrices[id] !== undefined && previousPrices[id] !== item.price) {
           flashClass = item.price > previousPrices[id] ? 'flash-up' : 'flash-down';
         }
         previousPrices[id] = item.price;
 
-        let stateTagHtml = '';
-        if (item.sessionState === 'OVERNIGHT') {
-          stateTagHtml = '<span class="state-badge state-on">OVERNIGHT</span>';
-        } else if (item.sessionState === 'PRE') {
-          stateTagHtml = '<span class="state-badge state-pre">PRE</span>';
-        } else if (item.sessionState === 'POST') {
-          stateTagHtml = '<span class="state-badge state-post">POST</span>';
-        }
-
         const daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
         const weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
         const isWeekOpen = !!openWeekDrawers[id];
-        const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd, item.regStart, item.regEnd, item.preStart);
+        const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
         const weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
 
         html += \`
@@ -873,9 +905,9 @@ app.get('/', (req, res) => {
                   <button class="btn-ctrl" onclick="sendToBottom('\${item.id}')" title="Bottom">⤓</button>
                 </div>
                 <span class="sym">\${item.name}</span>
-                \${stateTagHtml}
                 <span class="price-val \${flashClass}">\${priceStr}</span>
                 <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
+                \${extHtml}
                 <span class="sub">\${item.sub}</span>
               </div>
               <div class="topbar-right">
@@ -909,10 +941,12 @@ app.get('/', (req, res) => {
 
     async function poll() {
       try {
-        const res = await fetch('/api/data');
+        // Cache-busting timestamp prevents Android Chrome disk cache
+        const res = await fetch('/api/data?_=' + Date.now(), { cache: 'no-store' });
         const json = await res.json();
         if (json.items && json.items.length) {
           json.items.forEach(i => latestData[i.id] = i);
+          lastDataTime = Date.now();
           renderList();
         }
       } catch (e) {
@@ -921,7 +955,7 @@ app.get('/', (req, res) => {
     }
 
     poll();
-    setInterval(poll, 1500);
+    setInterval(poll, 2000);
   </script>
 </body>
 </html>`);
