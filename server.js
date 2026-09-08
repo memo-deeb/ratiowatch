@@ -3,21 +3,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BASE_SYMBOLS = [
-  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil' },
-  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold' },
-  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver' },
-  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar' },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc' },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.' },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED' },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.' },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.' },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation' },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.' },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group' },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.' },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.' },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.' }
+  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil', isStock: false },
+  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isStock: false },
+  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isStock: false },
+  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar', isStock: false },
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isStock: true },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isStock: true },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isStock: true },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isStock: true },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isStock: true },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isStock: true },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isStock: true },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true }
 ];
 
 const RATIO_PAIRS = [
@@ -35,52 +35,62 @@ const RATIO_PAIRS = [
 
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
+const WEBULL_TICKER_MAP = {}; // Cached symbol -> tickerId
 
-const HEADERS = {
-  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
-};
-
-// 1. Dedicated Real-Time Quote Engine (Pulls Pre/Post Market Prices)
-async function fetchQuotesBatch() {
-  const symbols = BASE_SYMBOLS.map(s => s.sym).join(',');
-  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`;
+// 1. Blue Ocean ATS (Webull Gateway) Resolver
+async function resolveWebullId(symbol) {
+  if (WEBULL_TICKER_MAP[symbol]) return WEBULL_TICKER_MAP[symbol];
   try {
-    const res = await fetch(url, { headers: HEADERS });
-    if (!res.ok) return {};
-    const json = await res.json();
-    const results = json.quoteResponse?.result || [];
-    const map = {};
-    
-    results.forEach(q => {
-      let extPrice = null;
-      let extType = null;
-      const state = q.marketState; // 'PRE', 'POST', 'REGULAR', 'CLOSED'
-
-      if ((state === 'PRE' || state === 'PREPRE') && q.preMarketPrice) {
-        extPrice = q.preMarketPrice;
-        extType = 'PM';
-      } else if ((state === 'POST' || state === 'POSTPOST' || state === 'CLOSED') && q.postMarketPrice) {
-        extPrice = q.postMarketPrice;
-        extType = 'AH';
+    const url = `https://quotes-gw.webullfintech.com/api/search/pc/tickers?keyword=${encodeURIComponent(symbol)}&pageIndex=1&pageSize=1`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'hl': 'en', 'gl': 'us'
       }
-
-      map[q.symbol] = {
-        extPrice,
-        extType,
-        liveRegularPrice: q.regularMarketPrice
-      };
     });
-    return map;
-  } catch (e) {
-    console.error('Quote batch failed:', e.message);
-    return {};
-  }
+    if (res.ok) {
+      const json = await res.json();
+      if (json.data && json.data.length > 0) {
+        WEBULL_TICKER_MAP[symbol] = json.data[0].tickerId;
+        return json.data[0].tickerId;
+      }
+    }
+  } catch (e) {}
+  return null;
 }
 
-// 2. Chart Engine (Strictly for regular hours calculations & SVGs)
-async function fetchChart(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=false`;
-  const res = await fetch(url, { headers: HEADERS });
+async function fetchBlueOceanQuote(symbol) {
+  try {
+    const tickerId = await resolveWebullId(symbol);
+    if (!tickerId) return null;
+
+    const url = `https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=${tickerId}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'hl': 'en', 'gl': 'us'
+      }
+    });
+    if (!res.ok) return null;
+    const d = await res.json();
+
+    // Webull returns nightPrice specifically for Blue Ocean ATS overnight trading
+    if (d.nightPrice && parseFloat(d.nightPrice) > 0) {
+      return { price: parseFloat(d.nightPrice), label: 'BOATS' };
+    }
+    if (d.pPrice && parseFloat(d.pPrice) > 0) {
+      return { price: parseFloat(d.pPrice), label: d.status === 'P' ? 'PRE' : 'AH' };
+    }
+  } catch (e) {}
+  return null;
+}
+
+// 2. Yahoo Finance Core Data Fetcher
+async function fetchYahooTicker(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true`;
+  const res = await fetch(url, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   const r = json.chart.result[0];
@@ -103,61 +113,81 @@ async function fetchChart(symbol) {
   let sessionStart = reg?.start;
   let sessionEnd = reg?.end;
 
-  const lastTickT = history.length ? history[history.length - 1].t : 0;
-  if (!sessionStart || lastTickT < sessionStart - 3600) {
-    const lastDate = new Date(lastTickT * 1000).toDateString();
-    const sameDay = history.filter(h => new Date(h.t * 1000).toDateString() === lastDate);
-    if (sameDay.length) {
-      sessionStart = sameDay[0].t;
-      sessionEnd = sessionStart + 23400;
-    } else {
-      sessionStart = lastTickT - 23400;
-      sessionEnd = lastTickT;
-    }
+  const now = Math.floor(Date.now() / 1000);
+  const lastTick = history.length ? history[history.length - 1] : null;
+  if (!sessionStart) {
+    sessionStart = (lastTick?.t || now) - 23400;
+    sessionEnd = lastTick?.t || now;
   }
 
-  return { symbol, price: curPrice, dailyPrevClose, weeklyPrevClose, sessionStart, sessionEnd, history };
+  // Backup off-market price from Yahoo if Blue Ocean feed is quiet
+  let fallbackExtPrice = null;
+  let fallbackExtLabel = '';
+  if (meta.postMarketPrice && meta.postMarketPrice !== curPrice) {
+    fallbackExtPrice = meta.postMarketPrice;
+    fallbackExtLabel = 'AH';
+  } else if (meta.preMarketPrice && meta.preMarketPrice !== curPrice) {
+    fallbackExtPrice = meta.preMarketPrice;
+    fallbackExtLabel = 'PRE';
+  }
+
+  return {
+    symbol,
+    price: curPrice,
+    fallbackExtPrice,
+    fallbackExtLabel,
+    dailyPrevClose,
+    weeklyPrevClose,
+    sessionStart,
+    sessionEnd,
+    history
+  };
 }
 
 async function syncAll() {
-  const [quoteMap, ...chartResults] = await Promise.all([
-    fetchQuotesBatch(),
+  const yMap = {};
+  const boMap = {};
+
+  // Parallel fetch: Yahoo core candles + Blue Ocean ATS live quotes
+  await Promise.allSettled([
     ...BASE_SYMBOLS.map(async (item) => {
       try {
-        return await fetchChart(item.sym);
-      } catch (e) {
-        return null;
-      }
+        yMap[item.sym] = await fetchYahooTicker(item.sym);
+      } catch (e) {}
+    }),
+    ...BASE_SYMBOLS.filter(s => s.isStock).map(async (item) => {
+      try {
+        boMap[item.sym] = await fetchBlueOceanQuote(item.sym);
+      } catch (e) {}
     })
   ]);
-
-  const map = {};
-  chartResults.forEach(d => {
-    if (d) map[d.symbol] = d;
-  });
 
   const results = [];
 
   // 1. Process Base Singles
   for (const item of BASE_SYMBOLS) {
-    const d = map[item.sym];
+    const d = yMap[item.sym];
     if (!d || !d.history.length) continue;
 
-    const q = quoteMap[item.sym] || {};
-    const curPrice = q.liveRegularPrice || d.price;
+    const curPrice = d.price;
     const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
     const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
-    const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300));
+    const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300) && h.t <= (d.sessionEnd + 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
+
+    // Prioritize Blue Ocean ATS price; fallback to Yahoo extended hours
+    const boData = boMap[item.sym];
+    const extPrice = boData?.price || d.fallbackExtPrice;
+    const extLabel = boData?.label || d.fallbackExtLabel;
 
     results.push({
       id: item.name,
       name: item.name,
       sub: item.sub,
       price: curPrice,
-      extPrice: q.extPrice || null,
-      extType: q.extType || null,
+      extPrice: (extPrice && extPrice !== curPrice) ? extPrice : null,
+      extLabel,
       dailyPrevClose: d.dailyPrevClose,
       weeklyPrevClose: d.weeklyPrevClose,
       dailyChangePct,
@@ -169,14 +199,11 @@ async function syncAll() {
     });
   }
 
-  // 2. Process Ratio Spreads
+  // 2. Process Ratio Spreads with Blue Ocean calculation
   for (const pair of RATIO_PAIRS) {
-    const d1 = map[pair.t1];
-    const d2 = map[pair.t2];
+    const d1 = yMap[pair.t1];
+    const d2 = yMap[pair.t2];
     if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
-
-    const q1 = quoteMap[pair.t1] || {};
-    const q2 = quoteMap[pair.t2] || {};
 
     const map2 = new Map(d2.history.map(h => [h.t, h.c]));
     const matched = d1.history
@@ -185,20 +212,7 @@ async function syncAll() {
 
     if (!matched.length) continue;
 
-    const p1 = q1.liveRegularPrice || d1.price;
-    const p2 = q2.liveRegularPrice || d2.price;
-    const curRatio = p2 > 0 ? p1 / p2 : matched[matched.length - 1].c;
-
-    // Calculate synthetic off-market ratio if either has an extended price
-    let extRatio = null;
-    let extType = null;
-    const e1 = q1.extPrice || p1;
-    const e2 = q2.extPrice || p2;
-    if (q1.extPrice || q2.extPrice) {
-      extRatio = e2 > 0 ? e1 / e2 : null;
-      extType = q1.extType || q2.extType || 'EXT';
-    }
-
+    const curRatio = d1.price / d2.price;
     const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
     const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
 
@@ -207,8 +221,25 @@ async function syncAll() {
 
     const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
     const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
-    const dayTicks = matched.filter(m => m.t >= (sessionStart - 300));
+    const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
+
+    // Compute synthetic Blue Ocean overnight spread if either asset is trading
+    const bo1 = boMap[pair.t1];
+    const bo2 = boMap[pair.t2];
+    const p1 = bo1?.price || d1.fallbackExtPrice || d1.price;
+    const p2 = bo2?.price || d2.fallbackExtPrice || d2.price;
+
+    let extRatio = null;
+    let extLabel = '';
+
+    if ((bo1?.price || d1.fallbackExtPrice || bo2?.price || d2.fallbackExtPrice) && p2 > 0) {
+      const candidate = p1 / p2;
+      if (Math.abs(candidate - curRatio) > 0.0001) {
+        extRatio = candidate;
+        extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || 'EXT');
+      }
+    }
 
     const id = `${pair.t1}/${pair.t2}`;
     results.push({
@@ -217,13 +248,13 @@ async function syncAll() {
       sub: 'Spread',
       price: curRatio,
       extPrice: extRatio,
-      extType: extType,
+      extLabel,
       dailyPrevClose: dailyPrevRatio,
       weeklyPrevClose: weeklyPrevRatio,
       dailyChangePct,
       weeklyChangePct,
-      sessionStart: sessionStart,
-      sessionEnd: sessionEnd,
+      sessionStart,
+      sessionEnd,
       daySeries: dayHistory,
       weekSeries: matched
     });
@@ -236,7 +267,7 @@ async function syncAll() {
 }
 
 syncAll();
-setInterval(syncAll, 2500);
+setInterval(syncAll, 3000);
 
 app.get('/api/data', (req, res) => {
   res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
@@ -278,10 +309,10 @@ app.get('/', (req, res) => {
       --base: #373e54;
       --btn-bg: #141722;
       --btn-border: #23283a;
+      --ext-blue: #38bdf8;
+      --ext-bg: rgba(56, 189, 248, 0.12);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
-      --ext-color: #38bdf8;
-      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="darkgray"] {
       --bg: #111216;
@@ -295,10 +326,10 @@ app.get('/', (req, res) => {
       --base: #42495d;
       --btn-bg: #22242c;
       --btn-border: #313542;
+      --ext-blue: #38bdf8;
+      --ext-bg: rgba(56, 189, 248, 0.14);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
-      --ext-color: #38bdf8;
-      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="navy"] {
       --bg: #090e1a;
@@ -312,10 +343,10 @@ app.get('/', (req, res) => {
       --base: #3b4252;
       --btn-bg: #1e293b;
       --btn-border: #334155;
+      --ext-blue: #60a5fa;
+      --ext-bg: rgba(96, 165, 250, 0.14);
       --flash-up: rgba(16, 185, 129, 0.85);
       --flash-down: rgba(239, 68, 68, 0.85);
-      --ext-color: #38bdf8;
-      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="warm"] {
       --bg: #f3efe6;
@@ -329,10 +360,10 @@ app.get('/', (req, res) => {
       --base: #b4bccb;
       --btn-bg: #ebe5d8;
       --btn-border: #dcd3bf;
+      --ext-blue: #0284c7;
+      --ext-bg: rgba(2, 132, 199, 0.12);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
-      --ext-color: #0284c7;
-      --ext-bg: rgba(2, 132, 199, 0.12);
     }
     :root[data-theme="light"] {
       --bg: #f8fafc;
@@ -346,10 +377,10 @@ app.get('/', (req, res) => {
       --base: #cbd5e1;
       --btn-bg: #e2e8f0;
       --btn-border: #cbd5e1;
+      --ext-blue: #2563eb;
+      --ext-bg: rgba(37, 99, 235, 0.1);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
-      --ext-color: #0284c7;
-      --ext-bg: rgba(2, 132, 199, 0.12);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-feature-settings: "tnum" 1; }
@@ -366,12 +397,11 @@ app.get('/', (req, res) => {
       background: var(--btn-bg); border: 1px solid var(--btn-border); color: var(--text);
       font-size: 0.72rem; font-weight: 700; padding: 5px 8px; border-radius: 5px; outline: none; cursor: pointer;
     }
-    .action-btn.active { background: #00c805; color: #000; border-color: #00c805; }
 
     .watchlist { margin-top: 8px; }
     .watchlist.card-view {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
       gap: 10px;
     }
     .watchlist.list-view {
@@ -395,13 +425,15 @@ app.get('/', (req, res) => {
       align-items: center;
       gap: 8px;
       margin-bottom: 6px;
+      flex-wrap: nowrap;
     }
     .topbar-left {
       display: flex;
       align-items: center;
       gap: 6px;
       min-width: 0;
-      flex-wrap: nowrap;
+      flex-shrink: 1;
+      overflow: hidden;
     }
     .topbar-right {
       display: flex;
@@ -428,25 +460,26 @@ app.get('/', (req, res) => {
       display: inline-block;
     }
 
-    /* Off-Market / Extended Hours Styling */
-    .ext-badge {
+    /* Blue Ocean & Off-Market High-Visibility Badge */
+    .ext-price-badge {
       display: inline-flex;
       align-items: baseline;
       gap: 3px;
+      color: var(--ext-blue);
       background: var(--ext-bg);
-      border: 1px solid var(--ext-color);
-      border-radius: 4px;
+      border: 1px solid rgba(56, 189, 248, 0.35);
       padding: 1px 5px;
-      color: var(--ext-color);
-      font-size: 0.88rem;
+      border-radius: 4px;
+      font-size: 0.94rem;
       font-weight: 800;
       white-space: nowrap;
+      box-shadow: 0 0 8px rgba(56, 189, 248, 0.15);
     }
-    .ext-tag {
-      font-size: 0.58rem;
+    .ext-label {
+      font-size: 0.6rem;
       font-weight: 900;
-      opacity: 0.85;
-      letter-spacing: 0.3px;
+      letter-spacing: 0.5px;
+      opacity: 0.9;
     }
 
     .badge {
@@ -549,7 +582,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot"></div> LIVE</div>
+      <div class="status"><div class="dot"></div> LIVE (BOATS 24H)</div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -845,15 +878,11 @@ app.get('/', (req, res) => {
 
         const priceStr = formatNumber(item.price);
 
-        // Extended hours markup
+        // Blue Ocean ATS / Extended Badge in electric blue
         let extHtml = '';
-        if (item.extPrice !== null && item.extPrice !== undefined) {
-          extHtml = \`
-            <span class="ext-badge" title="Extended Hours (\${item.extType})">
-              \${formatNumber(item.extPrice)}
-              <span class="ext-tag">\${item.extType}</span>
-            </span>
-          \`;
+        if (item.extPrice && item.extPrice > 0) {
+          const extPriceStr = formatNumber(item.extPrice);
+          extHtml = \`<span class="ext-price-badge">\${extPriceStr} <span class="ext-label">\${item.extLabel || 'BOATS'}</span></span>\`;
         }
 
         let flashClass = '';
