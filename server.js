@@ -3,21 +3,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BASE_SYMBOLS = [
-  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil', isStock: false },
+  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude', isStock: false },
   { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isStock: false },
   { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isStock: false },
-  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar', isStock: false },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true, webullId: '913253396' },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isStock: true, webullId: '913254556' },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true, webullId: '913444436' },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isStock: true, webullId: '913255280' },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true, webullId: null },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isStock: true, webullId: '913254287' },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isStock: true, webullId: '913444211' },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isStock: true, webullId: '913446973' },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isStock: true, webullId: '913254245' },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isStock: true, webullId: '913255167' },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true, webullId: '913255146' }
+  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / USD', isStock: false },
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isStock: true, wid: '913253396' },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings', isStock: true, wid: '913254556' },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isStock: true, wid: '913444436' },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group', isStock: true, wid: '913255280' },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isStock: true, wid: null },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corp', isStock: true, wid: '913254287' },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital', isStock: true, wid: '913444211' },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Tech', isStock: true, wid: '913446973' },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer', isStock: true, wid: '913254245' },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings', isStock: true, wid: '913255167' },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isStock: true, wid: '913255146' }
 ];
 
 const RATIO_PAIRS = [
@@ -33,59 +33,38 @@ const RATIO_PAIRS = [
   { t1: 'IREN', t2: 'WULF' }
 ];
 
-let CACHED_DATA = [];
+let CACHED_PAYLOAD = [];
 let LAST_UPDATE = 0;
-let isSyncing = false;
-const LAST_GOOD_MAP = {};
+const RAW_CACHE = {};
+const BO_CACHE = {};
 
-// Robust fetch with strict timeout
-async function fetchWithTimeout(url, headers = {}, timeoutMs = 3500) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+// Fast fetch with strict 2.5s abort
+async function fastFetch(url, headers = {}, timeoutMs = 2500) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
-    const res = await fetch(url, { signal: controller.signal, headers });
-    clearTimeout(timer);
+    const res = await fetch(url, { signal: ctrl.signal, headers });
+    clearTimeout(t);
     return res;
   } catch (e) {
-    clearTimeout(timer);
+    clearTimeout(t);
     return null;
   }
 }
 
-// 1. Blue Ocean ATS (Webull Gateway)
-async function fetchBlueOcean(webullId) {
-  if (!webullId) return null;
-  const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + webullId;
-  const res = await fetchWithTimeout(url, {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'hl': 'en', 'gl': 'us', 'platform': 'pc'
-  }, 2000);
-  if (!res || !res.ok) return null;
-  try {
-    const d = await res.json();
-    if (d.nightPrice && parseFloat(d.nightPrice) > 0) {
-      return { price: parseFloat(d.nightPrice), label: 'BOATS' };
-    }
-    if (d.pPrice && parseFloat(d.pPrice) > 0) {
-      return { price: parseFloat(d.pPrice), label: d.status === 'P' ? 'PRE' : 'AH' };
-    }
-  } catch (e) {}
-  return null;
-}
-
-// 2. Yahoo Chart Feed (Candles + Off-Market Ticks)
-async function fetchTicker(symbol) {
-  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=5m&includePrePost=true';
-  const res = await fetchWithTimeout(url, {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-    'Accept': '*/*'
-  }, 3500);
+// 1. Fast Yahoo 15m Chart Fetcher
+async function fetchYahoo(symbol) {
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
+  const res = await fastFetch(url, {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36'
+  }, 2500);
 
   if (!res || !res.ok) return null;
   try {
     const json = await res.json();
-    if (!json.chart || !json.chart.result || !json.chart.result.length) return null;
-    const r = json.chart.result[0];
+    const r = json.chart?.result?.[0];
+    if (!r) return null;
+
     const meta = r.meta;
     const times = r.timestamp || [];
     const quotes = r.indicators?.quote?.[0]?.close || [];
@@ -103,29 +82,26 @@ async function fetchTicker(symbol) {
     const weeklyPrevClose = meta.chartPreviousClose || history[0].c;
 
     const reg = meta.currentTradingPeriod?.regular;
-    let sessionStart = reg?.start;
-    let sessionEnd = reg?.end;
-
+    let sStart = reg?.start;
+    let sEnd = reg?.end;
     const now = Math.floor(Date.now() / 1000);
     const lastTick = history[history.length - 1];
 
-    if (!sessionStart || lastTick.t < sessionStart - 3600) {
-      sessionStart = lastTick.t - 23400;
-      sessionEnd = lastTick.t;
+    if (!sStart || lastTick.t < sStart - 3600) {
+      sStart = lastTick.t - 23400;
+      sEnd = lastTick.t;
     }
 
-    // Extended hours tick extraction
     let extPrice = null;
     let extLabel = '';
-
-    if (now > sessionEnd || now < sessionStart) {
+    if (now > sEnd || now < sStart) {
       if (meta.postMarketPrice && Math.abs(meta.postMarketPrice - curPrice) > 0.0001) {
         extPrice = meta.postMarketPrice;
         extLabel = 'AH';
       } else if (meta.preMarketPrice && Math.abs(meta.preMarketPrice - curPrice) > 0.0001) {
         extPrice = meta.preMarketPrice;
         extLabel = 'PRE';
-      } else if (lastTick.t > (sessionEnd + 120) && Math.abs(lastTick.c - curPrice) > 0.0001) {
+      } else if (lastTick.t > (sEnd + 120) && Math.abs(lastTick.c - curPrice) > 0.0001) {
         extPrice = lastTick.c;
         extLabel = 'AH';
       }
@@ -138,8 +114,8 @@ async function fetchTicker(symbol) {
       extLabel,
       dailyPrevClose,
       weeklyPrevClose,
-      sessionStart,
-      sessionEnd,
+      sStart,
+      sEnd,
       history
     };
   } catch (e) {
@@ -147,155 +123,155 @@ async function fetchTicker(symbol) {
   }
 }
 
-async function syncAll() {
-  if (isSyncing) return;
-  isSyncing = true;
-
+// 2. Isolated Webull BOATS Fetcher
+async function fetchWebull(wid) {
+  if (!wid) return null;
+  const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
+  const res = await fastFetch(url, {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'hl': 'en', 'gl': 'us'
+  }, 1800);
+  if (!res || !res.ok) return null;
   try {
-    const rawMap = {};
-    const boMap = {};
+    const d = await res.json();
+    if (d.nightPrice && parseFloat(d.nightPrice) > 0) return { price: parseFloat(d.nightPrice), label: 'BOATS' };
+    if (d.pPrice && parseFloat(d.pPrice) > 0) return { price: parseFloat(d.pPrice), label: d.status === 'P' ? 'PRE' : 'AH' };
+  } catch (e) {}
+  return null;
+}
 
-    // Parallel fetch with auto-timeout
-    await Promise.allSettled([
-      ...BASE_SYMBOLS.map(async (item) => {
-        const d = await fetchTicker(item.sym);
-        if (d) {
-          rawMap[item.sym] = d;
-          LAST_GOOD_MAP[item.sym] = d;
-        } else if (LAST_GOOD_MAP[item.sym]) {
-          rawMap[item.sym] = LAST_GOOD_MAP[item.sym];
-        }
-      }),
-      ...BASE_SYMBOLS.filter(s => s.isStock && s.webullId).map(async (item) => {
-        const bo = await fetchBlueOcean(item.webullId);
-        if (bo) boMap[item.sym] = bo;
-      })
-    ]);
+// Background loop for Webull (runs independently every 8 seconds)
+async function webullWorker() {
+  const stockItems = BASE_SYMBOLS.filter(s => s.isStock && s.wid);
+  for (const item of stockItems) {
+    const data = await fetchWebull(item.wid);
+    if (data) BO_CACHE[item.sym] = data;
+  }
+  setTimeout(webullWorker, 8000);
+}
+webullWorker();
 
-    const results = [];
+// Core fast aggregation cycle
+async function buildPayload() {
+  await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
+    const d = await fetchYahoo(item.sym);
+    if (d) RAW_CACHE[item.sym] = d;
+  }));
 
-    // 1. Process Individual Tickers
-    for (const item of BASE_SYMBOLS) {
-      const d = rawMap[item.sym];
-      if (!d || !d.history.length) continue;
+  const list = [];
 
-      const curPrice = d.price;
-      const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
-      const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
+  // 1. Process Base Singles
+  for (const item of BASE_SYMBOLS) {
+    const d = RAW_CACHE[item.sym];
+    if (!d || !d.history.length) continue;
 
-      const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300) && h.t <= (d.sessionEnd + 300));
-      const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
+    const cur = d.price;
+    const dayPct = ((cur - d.dailyPrevClose) / d.dailyPrevClose) * 100;
+    const weekPct = ((cur - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
-      const bo = boMap[item.sym];
-      const activeExtPrice = bo ? bo.price : d.extPrice;
-      const activeExtLabel = bo ? bo.label : d.extLabel;
+    const dayTicks = d.history.filter(h => h.t >= (d.sStart - 300) && h.t <= (d.sEnd + 300));
+    const dayHistory = dayTicks.length > 2 ? dayTicks : d.history.slice(-30);
 
-      let extChangePct = null;
-      if (activeExtPrice && activeExtPrice > 0 && Math.abs(activeExtPrice - curPrice) > 0.0001) {
-        extChangePct = ((activeExtPrice - curPrice) / curPrice) * 100;
+    const bo = BO_CACHE[item.sym];
+    const extP = bo ? bo.price : d.extPrice;
+    const extL = bo ? bo.label : d.extLabel;
+    let extPct = null;
+    if (extP && extP > 0 && Math.abs(extP - cur) > 0.0001) {
+      extPct = ((extP - cur) / cur) * 100;
+    }
+
+    list.push({
+      id: item.name,
+      name: item.name,
+      sub: item.sub,
+      price: cur,
+      extPrice: extPct !== null ? extP : null,
+      extPct,
+      extLabel: extL,
+      dailyPrev: d.dailyPrevClose,
+      weeklyPrev: d.weeklyPrevClose,
+      dayPct,
+      weekPct,
+      sStart: d.sStart,
+      sEnd: d.sEnd,
+      daySeries: dayHistory,
+      weekSeries: d.history
+    });
+  }
+
+  // 2. Process Ratio Spreads
+  for (const pair of RATIO_PAIRS) {
+    const d1 = RAW_CACHE[pair.t1];
+    const d2 = RAW_CACHE[pair.t2];
+    if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
+
+    const curRatio = d1.price / d2.price;
+    const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
+    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+
+    const dayPct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
+    const weekPct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
+
+    const map2 = new Map(d2.history.map(h => [h.t, h.c]));
+    const matched = d1.history.filter(h => map2.has(h.t)).map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
+
+    const sStart = Math.max(d1.sStart, d2.sStart);
+    const sEnd = Math.max(d1.sEnd, d2.sEnd);
+    const dayTicks = matched.filter(m => m.t >= (sStart - 300) && m.t <= (sEnd + 300));
+    const dayHistory = dayTicks.length > 2 ? dayTicks : matched.slice(-30);
+
+    const bo1 = BO_CACHE[pair.t1];
+    const bo2 = BO_CACHE[pair.t2];
+    const p1 = (bo1 ? bo1.price : d1.extPrice) || d1.price;
+    const p2 = (bo2 ? bo2.price : d2.extPrice) || d2.price;
+
+    let extRatio = null;
+    let extPct = null;
+    let extLabel = '';
+
+    if ((bo1 || d1.extPrice || bo2 || d2.extPrice) && p2 > 0) {
+      const candidate = p1 / p2;
+      if (Math.abs(candidate - curRatio) > 0.0001) {
+        extRatio = candidate;
+        extPct = ((extRatio - curRatio) / curRatio) * 100;
+        extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || d1.extLabel || d2.extLabel || 'EXT');
       }
-
-      results.push({
-        id: item.name,
-        name: item.name,
-        sub: item.sub,
-        price: curPrice,
-        extPrice: extChangePct !== null ? activeExtPrice : null,
-        extChangePct,
-        extLabel: activeExtLabel,
-        dailyPrevClose: d.dailyPrevClose,
-        weeklyPrevClose: d.weeklyPrevClose,
-        dailyChangePct,
-        weeklyChangePct,
-        sessionStart: d.sessionStart,
-        sessionEnd: d.sessionEnd,
-        daySeries: dayHistory,
-        weekSeries: d.history
-      });
     }
 
-    // 2. Process Ratio Spreads
-    for (const pair of RATIO_PAIRS) {
-      const d1 = rawMap[pair.t1];
-      const d2 = rawMap[pair.t2];
-      if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
+    list.push({
+      id: pair.t1 + '/' + pair.t2,
+      name: pair.t1 + '/' + pair.t2,
+      sub: 'Spread',
+      price: curRatio,
+      extPrice: extRatio,
+      extPct,
+      extLabel,
+      dailyPrev: dailyPrevRatio,
+      weeklyPrev: weeklyPrevRatio,
+      dayPct,
+      weekPct,
+      sStart,
+      sEnd,
+      daySeries: dayHistory,
+      weekSeries: matched
+    });
+  }
 
-      const curRatio = d1.price / d2.price;
-      const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
-      const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
-
-      const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
-      const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
-
-      const map2 = new Map(d2.history.map(h => [h.t, h.c]));
-      const matched = d1.history
-        .filter(h => map2.has(h.t))
-        .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
-
-      const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
-      const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
-      const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
-      const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
-
-      const bo1 = boMap[pair.t1];
-      const bo2 = boMap[pair.t2];
-      const p1 = (bo1 ? bo1.price : d1.extPrice) || d1.price;
-      const p2 = (bo2 ? bo2.price : d2.extPrice) || d2.price;
-
-      let extRatio = null;
-      let extChangePct = null;
-      let extLabel = '';
-
-      if ((bo1 || d1.extPrice || bo2 || d2.extPrice) && p2 > 0) {
-        const candidate = p1 / p2;
-        if (Math.abs(candidate - curRatio) > 0.0001) {
-          extRatio = candidate;
-          extChangePct = ((extRatio - curRatio) / curRatio) * 100;
-          extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || d1.extLabel || d2.extLabel || 'EXT');
-        }
-      }
-
-      const id = pair.t1 + '/' + pair.t2;
-      results.push({
-        id,
-        name: id,
-        sub: 'Spread',
-        price: curRatio,
-        extPrice: extRatio,
-        extChangePct,
-        extLabel,
-        dailyPrevClose: dailyPrevRatio,
-        weeklyPrevClose: weeklyPrevRatio,
-        dailyChangePct,
-        weeklyChangePct,
-        sessionStart,
-        sessionEnd,
-        daySeries: dayHistory,
-        weekSeries: matched
-      });
-    }
-
-    if (results.length > 0) {
-      CACHED_DATA = results;
-      LAST_UPDATE = Date.now();
-    }
-  } finally {
-    isSyncing = false;
+  if (list.length > 0) {
+    CACHED_PAYLOAD = list;
+    LAST_UPDATE = Date.now();
   }
 }
 
-// Non-overlapping loop ensures requests never pile up
-async function workerLoop() {
-  await syncAll();
-  setTimeout(workerLoop, 2500);
+// Rapid non-blocking server polling (every 2.5 seconds)
+async function coreWorker() {
+  await buildPayload();
+  setTimeout(coreWorker, 2500);
 }
-workerLoop();
+coreWorker();
 
-app.get('/api/data', async (req, res) => {
-  if (!CACHED_DATA.length) {
-    await syncAll();
-  }
-  res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
+app.get('/api/data', (req, res) => {
+  res.json({ updated: LAST_UPDATE, items: CACHED_PAYLOAD });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -421,7 +397,6 @@ app.get('/', (req, res) => {
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
     .dot { width: 7px; height: 7px; background: #00c805; border-radius: 50%; box-shadow: 0 0 6px #00c805; }
-    .dot.syncing { background: #eab308; box-shadow: 0 0 6px #eab308; }
 
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .action-btn, select.theme-select {
@@ -439,14 +414,6 @@ app.get('/', (req, res) => {
       display: flex;
       flex-direction: column;
       gap: 8px;
-    }
-
-    .loading-notice {
-      text-align: center;
-      padding: 50px 20px;
-      color: var(--text-sub);
-      font-size: 0.88rem;
-      font-weight: 600;
     }
 
     .card {
@@ -617,7 +584,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">CONNECTING</span></div>
+      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">LIVE</span></div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -632,9 +599,7 @@ app.get('/', (req, res) => {
     </div>
   </header>
 
-  <div class="watchlist card-view" id="watchlist">
-    <div class="loading-notice" id="loadingNotice">Loading real-time market data...</div>
-  </div>
+  <div class="watchlist card-view" id="watchlist"></div>
 
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
@@ -672,7 +637,7 @@ app.get('/', (req, res) => {
     function switchTheme(theme) {
       document.documentElement.setAttribute('data-theme', theme);
       localStorage.setItem('rw_theme', theme);
-      renderList();
+      renderList(true);
     }
 
     function formatTime(ts) {
@@ -693,27 +658,19 @@ app.get('/', (req, res) => {
       var min = Math.min.apply(null, vals);
       var max = Math.max.apply(null, vals);
       var range = max === min ? 1 : max - min;
-
       var sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
 
       var pts = series.map(function(s, i) {
-        var xFrac;
-        if (isDay && sStart) {
-          xFrac = Math.max(0, Math.min(1, (s.t - sStart) / sessionDuration));
-        } else {
-          xFrac = i / (series.length - 1);
-        }
+        var xFrac = (isDay && sStart) ? Math.max(0, Math.min(1, (s.t - sStart) / sessionDuration)) : (i / (series.length - 1));
         var x = padLeft + xFrac * cw;
         var y = padTop + ch - ((s.c - min) / range) * ch;
         return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), val: s.c, t: s.t };
       });
 
-      // Save to memory map for instant 1:1 scrubbing without DOM stringification overhead
       window.CHART_STORE[id] = { pts: pts, padLeft: padLeft, cw: cw };
 
       var strokePath = 'M ' + pts.map(function(p) { return p.x + ',' + p.y; }).join(' L ');
       var areaPath = strokePath + ' L ' + pts[pts.length - 1].x + ',' + (padTop + ch) + ' L ' + pts[0].x + ',' + (padTop + ch) + ' Z';
-
       var isPos = vals[vals.length - 1] >= (baselineVal || vals[0]);
       var themeColor = isPos ? '#00c805' : '#ff3b30';
 
@@ -754,16 +711,9 @@ app.get('/', (req, res) => {
         return v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
       };
 
-      var xStart, xMid, xEnd;
-      if (isDay && sStart && sEnd) {
-        xStart = formatTime(sStart);
-        xMid = formatTime(sStart + sessionDuration / 2);
-        xEnd = formatTime(sEnd);
-      } else {
-        xStart = formatDay(series[0].t);
-        xMid = formatDay(series[Math.floor(series.length / 2)].t);
-        xEnd = formatDay(series[series.length - 1].t);
-      }
+      var xStart = (isDay && sStart) ? formatTime(sStart) : formatDay(series[0].t);
+      var xMid = (isDay && sStart) ? formatTime(sStart + sessionDuration / 2) : formatDay(series[Math.floor(series.length / 2)].t);
+      var xEnd = (isDay && sEnd) ? formatTime(sEnd) : formatDay(series[series.length - 1].t);
 
       return '<svg viewBox="0 0 ' + w + ' ' + h + '" id="' + id + '" ' +
         'onpointermove="scrubExact(event, \'' + id + '\')" onpointerleave="leaveExact(\'' + id + '\')">' +
@@ -837,14 +787,14 @@ app.get('/', (req, res) => {
     function toggleWeek(id) {
       openWeekDrawers[id] = !openWeekDrawers[id];
       localStorage.setItem('open_drawers', JSON.stringify(openWeekDrawers));
-      renderList();
+      renderList(true);
     }
 
     function toggleAllWeek() {
       allWeekOpen = !allWeekOpen;
       Object.keys(latestData).forEach(function(k) { openWeekDrawers[k] = allWeekOpen; });
       localStorage.setItem('open_drawers', JSON.stringify(openWeekDrawers));
-      renderList();
+      renderList(true);
     }
 
     function reorderItem(id, dir) {
@@ -856,7 +806,7 @@ app.get('/', (req, res) => {
       savedOrder[idx] = savedOrder[targetIdx];
       savedOrder[targetIdx] = temp;
       localStorage.setItem('user_order', JSON.stringify(savedOrder));
-      renderList();
+      renderList(true);
     }
 
     function sendToTop(id) {
@@ -865,7 +815,7 @@ app.get('/', (req, res) => {
         savedOrder.splice(idx, 1);
         savedOrder.unshift(id);
         localStorage.setItem('user_order', JSON.stringify(savedOrder));
-        renderList();
+        renderList(true);
       }
     }
 
@@ -875,11 +825,11 @@ app.get('/', (req, res) => {
         savedOrder.splice(idx, 1);
         savedOrder.push(id);
         localStorage.setItem('user_order', JSON.stringify(savedOrder));
-        renderList();
+        renderList(true);
       }
     }
 
-    function renderList() {
+    function renderList(forceFullRebuild) {
       var container = document.getElementById('watchlist');
       var keys = Object.keys(latestData);
       if (!keys.length) return;
@@ -893,16 +843,44 @@ app.get('/', (req, res) => {
         });
       }
 
+      var existingCards = container.querySelectorAll('.card');
+      if (existingCards.length === savedOrder.length && !forceFullRebuild) {
+        // Fast in-place DOM patch: updates only numbers and price flashes with zero lag
+        savedOrder.forEach(function(id) {
+          var item = latestData[id];
+          if (!item) return;
+
+          var card = container.querySelector('[data-id="' + item.id + '"]');
+          if (!card) return;
+
+          var pEl = card.querySelector('.price-val');
+          var formatNumber = function(num) {
+            return num >= 1000 ? num.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
+                   num >= 10 ? num.toFixed(2) : num.toFixed(4);
+          };
+
+          var newPriceStr = formatNumber(item.price);
+          if (pEl && pEl.textContent !== newPriceStr) {
+            var flashClass = (previousPrices[id] !== undefined && item.price > previousPrices[id]) ? 'flash-up' : 'flash-down';
+            pEl.className = 'price-val ' + flashClass;
+            pEl.textContent = newPriceStr;
+            previousPrices[id] = item.price;
+          }
+        });
+        return;
+      }
+
+      // Initial or full layout build
       var html = '';
       savedOrder.forEach(function(id) {
         var item = latestData[id];
         if (!item) return;
 
-        var dayPos = item.dailyChangePct >= 0;
+        var dayPos = item.dayPct >= 0;
         var dayBadge = dayPos ? 'up-bg' : 'down-bg';
         var daySign = dayPos ? '+' : '';
 
-        var weekPos = item.weeklyChangePct >= 0;
+        var weekPos = item.weekPct >= 0;
         var weekBadge = weekPos ? 'up-bg' : 'down-bg';
         var weekSign = weekPos ? '+' : '';
 
@@ -916,8 +894,8 @@ app.get('/', (req, res) => {
         var extHtml = '';
         if (item.extPrice && item.extPrice > 0) {
           var extPriceStr = formatNumber(item.extPrice);
-          var extSign = item.extChangePct >= 0 ? '+' : '';
-          var extPctStr = item.extChangePct !== null ? (extSign + item.extChangePct.toFixed(2) + '%') : '';
+          var extSign = item.extPct >= 0 ? '+' : '';
+          var extPctStr = item.extPct !== null ? (extSign + item.extPct.toFixed(2) + '%') : '';
           extHtml = '<span class="ext-price-badge">' +
             '<span class="ext-price">' + extPriceStr + '</span>' +
             (extPctStr ? '<span class="ext-pct">' + extPctStr + '</span>' : '') +
@@ -925,18 +903,12 @@ app.get('/', (req, res) => {
           '</span>';
         }
 
-        var flashClass = '';
-        if (previousPrices[id] !== undefined && previousPrices[id] !== item.price) {
-          flashClass = item.price > previousPrices[id] ? 'flash-up' : 'flash-down';
-        }
-        previousPrices[id] = item.price;
-
         var daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
         var weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
         var isWeekOpen = !!openWeekDrawers[id];
-        var daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
-        var weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
+        var daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrev, true, item.sStart, item.sEnd);
+        var weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrev, false) : '';
 
         html += '<div class="card" draggable="true" data-id="' + item.id + '">' +
           '<div class="card-topbar">' +
@@ -949,9 +921,9 @@ app.get('/', (req, res) => {
                 '<button class="btn-ctrl" onclick="sendToBottom(\'' + item.id + '\')" title="Bottom">⤓</button>' +
               '</div>' +
               '<span class="sym">' + item.name + '</span>' +
-              '<span class="price-val ' + flashClass + '">' + priceStr + '</span>' +
+              '<span class="price-val">' + priceStr + '</span>' +
               extHtml +
-              '<span class="badge ' + dayBadge + '">' + daySign + item.dailyChangePct.toFixed(2) + '%</span>' +
+              '<span class="badge ' + dayBadge + '">' + daySign + item.dayPct.toFixed(2) + '%</span>' +
               '<span class="sub">' + item.sub + '</span>' +
             '</div>' +
             '<div class="topbar-right">' +
@@ -963,7 +935,7 @@ app.get('/', (req, res) => {
           '<div class="week-drawer ' + (isWeekOpen ? 'open' : '') + '">' +
             '<div class="week-drawer-hdr">' +
               '<div style="display:flex; align-items:center; gap:6px;">' +
-                '<span class="badge ' + weekBadge + '">' + weekSign + item.weeklyChangePct.toFixed(2) + '%</span>' +
+                '<span class="badge ' + weekBadge + '">' + weekSign + item.weekPct.toFixed(2) + '%</span>' +
                 '<span class="sub">5D Trend</span>' +
               '</div>' +
               '<span id="' + weekSvgId + '-readout" class="scrub-readout"></span>' +
@@ -980,29 +952,16 @@ app.get('/', (req, res) => {
       try {
         var res = await fetch('/api/data');
         var json = await res.json();
-        var dot = document.getElementById('liveDot');
-        var txt = document.getElementById('statusTxt');
-
         if (json.items && json.items.length) {
           json.items.forEach(function(i) { latestData[i.id] = i; });
           localStorage.setItem('cached_ratios', JSON.stringify(latestData));
-          renderList();
-          dot.className = 'dot';
-          txt.textContent = 'LIVE (' + json.items.length + '/' + json.items.length + ')';
-        } else {
-          dot.className = 'dot syncing';
-          txt.textContent = 'SYNCING';
+          renderList(false);
         }
-      } catch (e) {
-        var dot = document.getElementById('liveDot');
-        var txt = document.getElementById('statusTxt');
-        dot.className = 'dot syncing';
-        txt.textContent = 'RECONNECTING';
-      }
+      } catch (e) {}
     }
 
-    // 1. Instant paint from device cache
-    renderList();
+    // 1. Instant 0ms Paint from local cache
+    renderList(true);
 
     // 2. Poll every 2 seconds
     poll();
