@@ -35,24 +35,64 @@ const RATIO_PAIRS = [
 
 let CACHED_PAYLOAD = [];
 let LAST_UPDATE = 0;
+let LAST_ERROR = '';
 const RAW_CACHE = {};
 const BO_CACHE = {};
 
-// Clean fetch without forbidden browser headers
-async function fetchYahoo(symbol) {
-  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
+// Session State for Cookie & Crumb
+let YAHOO_COOKIE = '';
+let YAHOO_CRUMB = '';
+
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36';
+
+// 1. Automatic Handshake: Obtains Session Cookie & Crumb to bypass Datacenter WAF
+async function initYahooSession() {
   try {
-    const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 6000);
-    const res = await fetch(url, {
-      signal: ctrl.signal,
+    const cookieRes = await fetch('https://fc.yahoo.com', {
+      headers: { 'User-Agent': UA }
+    });
+    const setCookie = cookieRes.headers.get('set-cookie');
+    if (setCookie) {
+      YAHOO_COOKIE = setCookie.split(';')[0];
+    }
+
+    const crumbUrl = 'https://query1.finance.yahoo.com/v1/test/getcrumb';
+    const crumbRes = await fetch(crumbUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-        'Accept': '*/*'
+        'User-Agent': UA,
+        'Cookie': YAHOO_COOKIE
       }
     });
+    if (crumbRes.ok) {
+      YAHOO_CRUMB = await crumbRes.text();
+      console.log('Yahoo session established. Crumb:', YAHOO_CRUMB);
+    }
+  } catch (e) {
+    console.error('Session handshake warning:', e.message);
+  }
+}
+
+// 2. Fetch Chart Candles with Crumb Authentication
+async function fetchChart(symbol) {
+  let url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=15m&includePrePost=true';
+  if (YAHOO_CRUMB) url += '&crumb=' + encodeURIComponent(YAHOO_CRUMB);
+
+  const headers = { 'User-Agent': UA };
+  if (YAHOO_COOKIE) headers['Cookie'] = YAHOO_COOKIE;
+
+  try {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), 4000);
+    const res = await fetch(url, { signal: ctrl.signal, headers });
     clearTimeout(t);
-    if (!res.ok) return null;
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) {
+        // Crumb expired or required, trigger re-authentication
+        initYahooSession();
+      }
+      return null;
+    }
 
     const json = await res.json();
     const r = json.chart?.result?.[0];
@@ -106,16 +146,16 @@ async function fetchYahoo(symbol) {
   }
 }
 
-// Background Blue Ocean fetcher
+// 3. Isolated Webull BOATS Fetcher
 async function fetchWebull(wid) {
   if (!wid) return null;
   try {
     const ctrl = new AbortController();
-    const t = setTimeout(() => ctrl.abort(), 2500);
+    const t = setTimeout(() => ctrl.abort(), 2000);
     const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + wid;
     const res = await fetch(url, {
       signal: ctrl.signal,
-      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'hl': 'en', 'gl': 'us' }
+      headers: { 'User-Agent': UA, 'hl': 'en', 'gl': 'us', 'platform': 'pc' }
     });
     clearTimeout(t);
     if (!res.ok) return null;
@@ -132,13 +172,13 @@ async function webullWorker() {
     const data = await fetchWebull(item.wid);
     if (data) BO_CACHE[item.sym] = data;
   }
-  setTimeout(webullWorker, 10000);
+  setTimeout(webullWorker, 8000);
 }
 webullWorker();
 
-async function syncAll() {
+async function buildPayload() {
   await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
-    const d = await fetchYahoo(item.sym);
+    const d = await fetchChart(item.sym);
     if (d) RAW_CACHE[item.sym] = d;
   }));
 
@@ -222,21 +262,25 @@ async function syncAll() {
   if (list.length > 0) {
     CACHED_PAYLOAD = list;
     LAST_UPDATE = Date.now();
+    LAST_ERROR = '';
+  } else {
+    LAST_ERROR = 'Yahoo data endpoint temporarily busy. Retrying...';
   }
 }
 
 async function loop() {
-  await syncAll();
+  await buildPayload();
   setTimeout(loop, 2500);
 }
-loop();
 
-// Guarantee initial payload before responding
+// Initialize session then start worker
+initYahooSession().then(() => loop());
+
 app.get('/api/data', async (req, res) => {
   if (!CACHED_PAYLOAD.length) {
-    await syncAll();
+    await buildPayload();
   }
-  res.json({ updated: LAST_UPDATE, items: CACHED_PAYLOAD });
+  res.json({ updated: LAST_UPDATE, error: LAST_ERROR, items: CACHED_PAYLOAD });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -417,7 +461,7 @@ app.get('/', (req, res) => {
   </header>
 
   <div class="watchlist card-view" id="watchlist">
-    <div class="notice" id="loadingNotice">Loading live market data...</div>
+    <div class="notice" id="loadingNotice">Establishing connection with exchange feeds...</div>
   </div>
 
   <script>
@@ -778,9 +822,11 @@ app.get('/', (req, res) => {
           renderList(false);
           dot.className = 'dot';
           txt.textContent = 'LIVE (' + json.items.length + ')';
-        } else {
+        } else if (json.error) {
           dot.className = 'dot syncing';
           txt.textContent = 'SYNCING';
+          var notice = document.getElementById('loadingNotice');
+          if (notice) notice.textContent = json.error;
         }
       } catch (e) {
         var dot = document.getElementById('liveDot');
@@ -790,12 +836,9 @@ app.get('/', (req, res) => {
       }
     }
 
-    // Paint immediately from cache if available
     renderList(true);
-
-    // Continuous 2s polling
     poll();
-    setInterval(poll, 2000);
+    setInterval(poll, 2500);
   </script>
 </body>
 </html>`);
