@@ -283,6 +283,8 @@ app.get('/', (req, res) => {
     .watchlist.card-view { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 10px; }
     .watchlist.list-view { display: flex; flex-direction: column; gap: 8px; }
 
+    .notice { text-align: center; padding: 60px 16px; color: var(--text-sub); font-size: 0.9rem; font-weight: 600; }
+
     .card {
       background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 8px;
       padding: 8px 10px 10px; transition: background 0.2s, border-color 0.2s;
@@ -387,12 +389,14 @@ app.get('/', (req, res) => {
     </div>
   </header>
 
-  <div class="watchlist card-view" id="watchlist"></div>
+  <div class="watchlist card-view" id="watchlist">
+    <div class="notice">Loading market tickers...</div>
+  </div>
 
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
     var previousPrices = {};
-    var latestData = {};
+    var latestData = JSON.parse(localStorage.getItem('cached_ratios') || '{}');
     var openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     var allWeekOpen = false;
     window.CHART_STORE = {};
@@ -738,15 +742,32 @@ app.get('/', (req, res) => {
       try {
         var res = await fetch('/api/data');
         var json = await res.json();
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+
         if (json.items && json.items.length) {
-          json.items.forEach(function(i) { latestData[i.id] = i; });
+          var mapped = {};
+          json.items.forEach(function(i) { mapped[i.id] = i; });
+          latestData = mapped;
+          localStorage.setItem('cached_ratios', JSON.stringify(latestData));
           renderList(false);
+          if (dot) dot.className = 'dot';
+          if (txt) txt.textContent = 'CONNECTED (' + json.items.length + ')';
         }
-      } catch (e) {}
+      } catch (e) {
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+        if (dot) dot.className = 'dot syncing';
+        if (txt) txt.textContent = 'CONNECTING';
+      }
     }
 
+    // Fallback: If cache is empty on startup, paint mock skeleton or trigger immediate poll
+    if (Object.keys(latestData).length > 0) {
+      renderList(true);
+    }
     poll();
-    setInterval(poll, 2000);
+    setInterval(poll, 2500);
   </script>
 </body>
 </html>`);
