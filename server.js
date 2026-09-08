@@ -36,10 +36,10 @@ const RATIO_PAIRS = [
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
 
-// 1. Primary Off-Market & Live Quote Fetcher (Yahoo v7 Quote API)
+// 1. Direct Multi-Quote Fetcher for Real-Time Extended Hours
 async function fetchAllQuotes(symbols) {
   try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${symbols.map(encodeURIComponent).join(',')}`;
+    const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + symbols.map(encodeURIComponent).join(',');
     const res = await fetch(url, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -59,11 +59,11 @@ async function fetchAllQuotes(symbols) {
   }
 }
 
-// 2. Blue Ocean ATS Overnight Quote Fetcher
+// 2. Webull Blue Ocean ATS Gateway Fetcher
 async function fetchBlueOceanQuote(webullId) {
   if (!webullId) return null;
   try {
-    const url = `https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=${webullId}`;
+    const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + webullId;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     const res = await fetch(url, {
@@ -86,13 +86,13 @@ async function fetchBlueOceanQuote(webullId) {
   return null;
 }
 
-// 3. Intraday & 5-Day Historical Candles
+// 3. 5-Day Intraday Candle History
 async function fetchTickerChart(symbol) {
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true`;
+  const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=5m&includePrePost=true';
   const res = await fetch(url, {
     headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) throw new Error('HTTP ' + res.status);
   const json = await res.json();
   const r = json.chart.result[0];
   const meta = r.meta;
@@ -170,39 +170,30 @@ async function syncAll() {
     const dailyChangePct = ((curPrice - dailyPrevClose) / dailyPrevClose) * 100;
     const weeklyChangePct = ((curPrice - weeklyPrevClose) / weeklyPrevClose) * 100;
 
-    // Strict regular session filtering for 1D chart
     const dayTicks = c.history.filter(h => h.t >= (c.sessionStart - 300) && h.t <= (c.sessionEnd + 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : c.history.slice(-78);
 
-    // Multi-tier off-market detection
     let extPrice = null;
     let extChangePct = null;
     let extLabel = '';
 
-    // A. Webull Blue Ocean ATS
-    if (bo && bo.price && bo.price !== curPrice) {
+    if (bo && bo.price && Math.abs(bo.price - curPrice) > 0.0001) {
       extPrice = bo.price;
       extLabel = bo.label;
       extChangePct = ((extPrice - curPrice) / curPrice) * 100;
-    }
-    // B. Yahoo Quote API (Official Post-Market)
-    else if (q.postMarketPrice && q.postMarketPrice > 0 && Math.abs(q.postMarketPrice - curPrice) > 0.0001) {
+    } else if (q.postMarketPrice && q.postMarketPrice > 0 && Math.abs(q.postMarketPrice - curPrice) > 0.0001) {
       extPrice = q.postMarketPrice;
       extLabel = 'AH';
       extChangePct = q.postMarketChangePercent !== undefined 
         ? q.postMarketChangePercent 
         : ((extPrice - curPrice) / curPrice) * 100;
-    }
-    // C. Yahoo Quote API (Official Pre-Market)
-    else if (q.preMarketPrice && q.preMarketPrice > 0 && Math.abs(q.preMarketPrice - curPrice) > 0.0001) {
+    } else if (q.preMarketPrice && q.preMarketPrice > 0 && Math.abs(q.preMarketPrice - curPrice) > 0.0001) {
       extPrice = q.preMarketPrice;
       extLabel = 'PRE';
       extChangePct = q.preMarketChangePercent !== undefined 
         ? q.preMarketChangePercent 
         : ((extPrice - curPrice) / curPrice) * 100;
-    }
-    // D. Extended candle tick fallback
-    else if (c.history.length) {
+    } else if (c.history.length) {
       const lastTick = c.history[c.history.length - 1];
       if (lastTick.t > (c.sessionEnd + 300) && Math.abs(lastTick.c - curPrice) > 0.0001) {
         extPrice = lastTick.c;
@@ -260,7 +251,6 @@ async function syncAll() {
     const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
     const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
 
-    // Compute synthetic off-market ratio & % difference
     const s1 = results.find(r => r.id === pair.t1);
     const s2 = results.find(r => r.id === pair.t2);
 
@@ -280,7 +270,7 @@ async function syncAll() {
       }
     }
 
-    const id = `${pair.t1}/${pair.t2}`;
+    const id = pair.t1 + '/' + pair.t2;
     results.push({
       id,
       name: id,
@@ -505,7 +495,6 @@ app.get('/', (req, res) => {
       display: inline-block;
     }
 
-    /* Off-Market Price & Percentage Badge */
     .ext-price-badge {
       display: inline-flex;
       align-items: baseline;
@@ -520,21 +509,9 @@ app.get('/', (req, res) => {
       white-space: nowrap;
       box-shadow: 0 0 8px rgba(56, 189, 248, 0.12);
     }
-    .ext-price {
-      font-weight: 800;
-    }
-    .ext-pct {
-      font-size: 0.72rem;
-      font-weight: 700;
-      opacity: 0.95;
-    }
-    .ext-label {
-      font-size: 0.58rem;
-      font-weight: 900;
-      letter-spacing: 0.4px;
-      opacity: 0.8;
-      text-transform: uppercase;
-    }
+    .ext-price { font-weight: 800; }
+    .ext-pct { font-size: 0.72rem; font-weight: 700; opacity: 0.95; }
+    .ext-label { font-size: 0.58rem; font-weight: 900; letter-spacing: 0.4px; opacity: 0.8; text-transform: uppercase; }
 
     .badge {
       font-size: 0.75rem;
@@ -654,20 +631,20 @@ app.get('/', (req, res) => {
   <div class="watchlist card-view" id="watchlist"></div>
 
   <script>
-    let savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
-    let previousPrices = {};
-    let latestData = {};
-    let openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
-    let allWeekOpen = false;
+    var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
+    var previousPrices = {};
+    var latestData = {};
+    var openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
+    var allWeekOpen = false;
 
-    let currentView = localStorage.getItem('rw_view') || 'card';
+    var currentView = localStorage.getItem('rw_view') || 'card';
     applyViewMode(currentView);
 
     function applyViewMode(mode) {
       currentView = mode;
       localStorage.setItem('rw_view', mode);
-      const container = document.getElementById('watchlist');
-      const btn = document.getElementById('viewToggleBtn');
+      var container = document.getElementById('watchlist');
+      var btn = document.getElementById('viewToggleBtn');
       if (mode === 'card') {
         container.className = 'watchlist card-view';
         btn.textContent = '⊞ Cards';
@@ -681,7 +658,7 @@ app.get('/', (req, res) => {
       applyViewMode(currentView === 'card' ? 'list' : 'card');
     }
 
-    const currentTheme = localStorage.getItem('rw_theme') || 'darkgray';
+    var currentTheme = localStorage.getItem('rw_theme') || 'darkgray';
     document.documentElement.setAttribute('data-theme', currentTheme);
     document.getElementById('themeSelect').value = currentTheme;
 
@@ -700,51 +677,51 @@ app.get('/', (req, res) => {
 
     function buildSvg(id, series, baselineVal, isDay, sStart, sEnd) {
       if (!series || series.length < 2) return '';
-      const w = 440, h = 130;
-      const padTop = 10, padBtm = 20, padLeft = 6, padRight = 55;
-      const ch = h - padTop - padBtm;
-      const cw = w - padLeft - padRight;
+      var w = 440, h = 130;
+      var padTop = 10, padBtm = 20, padLeft = 6, padRight = 55;
+      var ch = h - padTop - padBtm;
+      var cw = w - padLeft - padRight;
 
-      const vals = series.map(s => s.c);
-      const min = Math.min(...vals);
-      const max = Math.max(...vals);
-      const range = max === min ? 1 : max - min;
+      var vals = series.map(function(s) { return s.c; });
+      var min = Math.min.apply(null, vals);
+      var max = Math.max.apply(null, vals);
+      var range = max === min ? 1 : max - min;
 
-      let sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
+      var sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
 
-      const pts = series.map((s, i) => {
-        let xFrac;
+      var pts = series.map(function(s, i) {
+        var xFrac;
         if (isDay && sStart) {
           xFrac = Math.max(0, Math.min(1, (s.t - sStart) / sessionDuration));
         } else {
           xFrac = i / (series.length - 1);
         }
-        const x = padLeft + xFrac * cw;
-        const y = padTop + ch - ((s.c - min) / range) * ch;
+        var x = padLeft + xFrac * cw;
+        var y = padTop + ch - ((s.c - min) / range) * ch;
         return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), val: s.c, t: s.t };
       });
 
-      const strokePath = 'M ' + pts.map(p => p.x + ',' + p.y).join(' L ');
-      const areaPath = strokePath + ' L ' + pts[pts.length - 1].x + ',' + (padTop + ch) + ' L ' + pts[0].x + ',' + (padTop + ch) + ' Z';
+      var strokePath = 'M ' + pts.map(function(p) { return p.x + ',' + p.y; }).join(' L ');
+      var areaPath = strokePath + ' L ' + pts[pts.length - 1].x + ',' + (padTop + ch) + ' L ' + pts[0].x + ',' + (padTop + ch) + ' Z';
 
-      const isPos = vals[vals.length - 1] >= (baselineVal || vals[0]);
-      const themeColor = isPos ? '#00c805' : '#ff3b30';
+      var isPos = vals[vals.length - 1] >= (baselineVal || vals[0]);
+      var themeColor = isPos ? '#00c805' : '#ff3b30';
 
-      const midVal = (max + min) / 2;
-      const midY = padTop + ch / 2;
+      var midVal = (max + min) / 2;
+      var midY = padTop + ch / 2;
 
-      let baseSvg = '';
+      var baseSvg = '';
       if (baselineVal && baselineVal >= min && baselineVal <= max) {
-        const by = padTop + ch - ((baselineVal - min) / range) * ch;
+        var by = padTop + ch - ((baselineVal - min) / range) * ch;
         baseSvg = '<line class="base-line" x1="' + padLeft + '" y1="' + by.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + by.toFixed(1) + '" />';
       }
 
-      let dayMarkersSvg = '';
+      var dayMarkersSvg = '';
       if (!isDay) {
-        let lastDay = '';
-        const dayEndPts = [];
-        pts.forEach((p, idx) => {
-          const dayStr = formatDay(p.t);
+        var lastDay = '';
+        var dayEndPts = [];
+        pts.forEach(function(p, idx) {
+          var dayStr = formatDay(p.t);
           if (lastDay && dayStr !== lastDay) {
             dayMarkersSvg += '<line class="day-divider" x1="' + p.x + '" y1="' + padTop + '" x2="' + p.x + '" y2="' + (padTop + ch) + '" />';
             dayEndPts.push(pts[idx - 1]);
@@ -752,22 +729,22 @@ app.get('/', (req, res) => {
           lastDay = dayStr;
         });
         dayEndPts.push(pts[pts.length - 1]);
-        dayEndPts.forEach(dp => {
+        dayEndPts.forEach(function(dp) {
           if (dp) dayMarkersSvg += '<circle class="day-dot" cx="' + dp.x + '" cy="' + dp.y + '" r="3" fill="' + themeColor + '" />';
         });
       }
 
-      const lastPt = pts[pts.length - 1];
-      const liveDotSvg = \`
-        <g>
-          <circle class="live-dot-outer" cx="\${lastPt.x}" cy="\${lastPt.y}" r="6" fill="\${themeColor}" opacity="0.4" />
-          <circle cx="\${lastPt.x}" cy="\${lastPt.y}" r="4.5" fill="\${themeColor}" stroke="#ffffff" stroke-width="1.8" />
-        </g>
-      \`;
+      var lastPt = pts[pts.length - 1];
+      var liveDotSvg = '<g>' +
+        '<circle class="live-dot-outer" cx="' + lastPt.x + '" cy="' + lastPt.y + '" r="6" fill="' + themeColor + '" opacity="0.4" />' +
+        '<circle cx="' + lastPt.x + '" cy="' + lastPt.y + '" r="4.5" fill="' + themeColor + '" stroke="#ffffff" stroke-width="1.8" />' +
+      '</g>';
 
-      const fmtY = v => v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
+      var fmtY = function(v) {
+        return v >= 1000 ? v.toFixed(0) : v >= 10 ? v.toFixed(2) : v >= 1 ? v.toFixed(3) : v.toFixed(4);
+      };
 
-      let xStart, xMid, xEnd;
+      var xStart, xMid, xEnd;
       if (isDay && sStart && sEnd) {
         xStart = formatTime(sStart);
         xMid = formatTime(sStart + sessionDuration / 2);
@@ -778,61 +755,55 @@ app.get('/', (req, res) => {
         xEnd = formatDay(series[series.length - 1].t);
       }
 
-      return \`
-        <svg viewBox="0 0 \${w} \${h}" id="\${id}" 
-             data-pad-left="\${padLeft}" data-cw="\${cw}" data-points='\${JSON.stringify(pts)}' 
-             onpointermove="scrubExact(event, '\${id}')" onpointerleave="leaveExact('\${id}')">
-          <line class="grid-line" x1="\${padLeft}" y1="\${padTop}" x2="\${padLeft + cw}" y2="\${padTop}" />
-          <line class="grid-line" x1="\${padLeft}" y1="\${midY.toFixed(1)}" x2="\${padLeft + cw}" y2="\${midY.toFixed(1)}" />
-          <line class="grid-line" x1="\${padLeft}" y1="\${padTop + ch}" x2="\${padLeft + cw}" y2="\${padTop + ch}" />
-          \${baseSvg}
-          \${dayMarkersSvg}
-
-          <text class="axis-label" x="\${w - 2}" y="\${padTop + 8}" text-anchor="end">\${fmtY(max)}</text>
-          <text class="axis-label" x="\${w - 2}" y="\${(midY + 4).toFixed(1)}" text-anchor="end">\${fmtY(midVal)}</text>
-          <text class="axis-label" x="\${w - 2}" y="\${padTop + ch}" text-anchor="end">\${fmtY(min)}</text>
-
-          <path class="chart-area" d="\${areaPath}" fill="\${themeColor}" />
-          <path class="chart-line" d="\${strokePath}" stroke="\${themeColor}" />
-          \${liveDotSvg}
-
-          <text class="axis-label" x="\${padLeft}" y="\${h - 4}">\${xStart}</text>
-          <text class="axis-label" x="\${padLeft + cw / 2}" y="\${h - 4}" text-anchor="middle">\${xMid}</text>
-          <text class="axis-label" x="\${padLeft + cw}" y="\${h - 4}" text-anchor="end">\${xEnd}</text>
-
-          <g id="\${id}-cursor" style="display:none;">
-            <line id="\${id}-vline" class="cursor-line" y1="\${padTop}" y2="\${padTop + ch}" />
-            <circle id="\${id}-dot" class="cursor-dot" r="4.5" />
-          </g>
-        </svg>
-      \`;
+      return '<svg viewBox="0 0 ' + w + ' ' + h + '" id="' + id + '" ' +
+        'data-pad-left="' + padLeft + '" data-cw="' + cw + '" data-points=\'' + JSON.stringify(pts) + '\' ' +
+        'onpointermove="scrubExact(event, \'' + id + '\')" onpointerleave="leaveExact(\'' + id + '\')">' +
+        '<line class="grid-line" x1="' + padLeft + '" y1="' + padTop + '" x2="' + (padLeft + cw) + '" y2="' + padTop + '" />' +
+        '<line class="grid-line" x1="' + padLeft + '" y1="' + midY.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + midY.toFixed(1) + '" />' +
+        '<line class="grid-line" x1="' + padLeft + '" y1="' + (padTop + ch) + '" x2="' + (padLeft + cw) + '" y2="' + (padTop + ch) + '" />' +
+        baseSvg +
+        dayMarkersSvg +
+        '<text class="axis-label" x="' + (w - 2) + '" y="' + (padTop + 8) + '" text-anchor="end">' + fmtY(max) + '</text>' +
+        '<text class="axis-label" x="' + (w - 2) + '" y="' + (midY + 4).toFixed(1) + '" text-anchor="end">' + fmtY(midVal) + '</text>' +
+        '<text class="axis-label" x="' + (w - 2) + '" y="' + (padTop + ch) + '" text-anchor="end">' + fmtY(min) + '</text>' +
+        '<path class="chart-area" d="' + areaPath + '" fill="' + themeColor + '" />' +
+        '<path class="chart-line" d="' + strokePath + '" stroke="' + themeColor + '" />' +
+        liveDotSvg +
+        '<text class="axis-label" x="' + padLeft + '" y="' + (h - 4) + '">' + xStart + '</text>' +
+        '<text class="axis-label" x="' + (padLeft + cw / 2) + '" y="' + (h - 4) + '" text-anchor="middle">' + xMid + '</text>' +
+        '<text class="axis-label" x="' + (padLeft + cw) + '" y="' + (h - 4) + '" text-anchor="end">' + xEnd + '</text>' +
+        '<g id="' + id + '-cursor" style="display:none;">' +
+          '<line id="' + id + '-vline" class="cursor-line" y1="' + padTop + '" y2="' + (padTop + ch) + '" />' +
+          '<circle id="' + id + '-dot" class="cursor-dot" r="4.5" />' +
+        '</g>' +
+      '</svg>';
     }
 
     function scrubExact(e, id) {
-      const svg = document.getElementById(id);
+      var svg = document.getElementById(id);
       if (!svg) return;
-      const pts = JSON.parse(svg.getAttribute('data-points') || '[]');
+      var pts = JSON.parse(svg.getAttribute('data-points') || '[]');
       if (!pts.length) return;
 
-      const padLeft = parseFloat(svg.getAttribute('data-pad-left'));
-      const cw = parseFloat(svg.getAttribute('data-cw'));
+      var padLeft = parseFloat(svg.getAttribute('data-pad-left'));
+      var cw = parseFloat(svg.getAttribute('data-cw'));
 
-      const pt = svg.createSVGPoint();
+      var pt = svg.createSVGPoint();
       pt.x = e.clientX;
       pt.y = e.clientY;
-      const svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
+      var svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
 
-      let closest = pts[0];
-      let minDiff = 999999;
-      pts.forEach(p => {
-        const diff = Math.abs(p.x - svgP.x);
+      var closest = pts[0];
+      var minDiff = 999999;
+      pts.forEach(function(p) {
+        var diff = Math.abs(p.x - svgP.x);
         if (diff < minDiff) { minDiff = diff; closest = p; }
       });
 
-      const cursor = document.getElementById(id + '-cursor');
-      const vline = document.getElementById(id + '-vline');
-      const dot = document.getElementById(id + '-dot');
-      const readout = document.getElementById(id + '-readout');
+      var cursor = document.getElementById(id + '-cursor');
+      var vline = document.getElementById(id + '-vline');
+      var dot = document.getElementById(id + '-dot');
+      var readout = document.getElementById(id + '-readout');
 
       if (cursor && vline && dot) {
         cursor.style.display = 'block';
@@ -842,16 +813,16 @@ app.get('/', (req, res) => {
         dot.setAttribute('cy', closest.y);
       }
       if (readout) {
-        const d = new Date(closest.t * 1000);
-        const timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-        const valStr = closest.val >= 100 ? closest.val.toFixed(2) : closest.val >= 1 ? closest.val.toFixed(3) : closest.val.toFixed(4);
+        var d = new Date(closest.t * 1000);
+        var timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+        var valStr = closest.val >= 100 ? closest.val.toFixed(2) : closest.val >= 1 ? closest.val.toFixed(3) : closest.val.toFixed(4);
         readout.textContent = timeStr + ' | ' + valStr;
       }
     }
 
     function leaveExact(id) {
-      const cursor = document.getElementById(id + '-cursor');
-      const readout = document.getElementById(id + '-readout');
+      var cursor = document.getElementById(id + '-cursor');
+      var readout = document.getElementById(id + '-readout');
       if (cursor) cursor.style.display = 'none';
       if (readout) readout.textContent = '';
     }
@@ -864,17 +835,17 @@ app.get('/', (req, res) => {
 
     function toggleAllWeek() {
       allWeekOpen = !allWeekOpen;
-      Object.keys(latestData).forEach(k => openWeekDrawers[k] = allWeekOpen);
+      Object.keys(latestData).forEach(function(k) { openWeekDrawers[k] = allWeekOpen; });
       localStorage.setItem('open_drawers', JSON.stringify(openWeekDrawers));
       renderList();
     }
 
     function reorderItem(id, dir) {
-      const idx = savedOrder.indexOf(id);
+      var idx = savedOrder.indexOf(id);
       if (idx === -1) return;
-      const targetIdx = idx + dir;
+      var targetIdx = idx + dir;
       if (targetIdx < 0 || targetIdx >= savedOrder.length) return;
-      const temp = savedOrder[idx];
+      var temp = savedOrder[idx];
       savedOrder[idx] = savedOrder[targetIdx];
       savedOrder[targetIdx] = temp;
       localStorage.setItem('user_order', JSON.stringify(savedOrder));
@@ -882,7 +853,7 @@ app.get('/', (req, res) => {
     }
 
     function sendToTop(id) {
-      const idx = savedOrder.indexOf(id);
+      var idx = savedOrder.indexOf(id);
       if (idx > 0) {
         savedOrder.splice(idx, 1);
         savedOrder.unshift(id);
@@ -892,7 +863,7 @@ app.get('/', (req, res) => {
     }
 
     function sendToBottom(id) {
-      const idx = savedOrder.indexOf(id);
+      var idx = savedOrder.indexOf(id);
       if (idx !== -1 && idx < savedOrder.length - 1) {
         savedOrder.splice(idx, 1);
         savedOrder.push(id);
@@ -902,105 +873,96 @@ app.get('/', (req, res) => {
     }
 
     function renderList() {
-      const container = document.getElementById('watchlist');
+      var container = document.getElementById('watchlist');
       if (!Object.keys(latestData).length) return;
 
       if (!savedOrder.length) {
         savedOrder = Object.keys(latestData);
         localStorage.setItem('user_order', JSON.stringify(savedOrder));
       } else {
-        Object.keys(latestData).forEach(k => {
-          if (!savedOrder.includes(k)) savedOrder.push(k);
+        Object.keys(latestData).forEach(function(k) {
+          if (savedOrder.indexOf(k) === -1) savedOrder.push(k);
         });
       }
 
-      let html = '';
-      savedOrder.forEach(id => {
-        const item = latestData[id];
+      var html = '';
+      savedOrder.forEach(function(id) {
+        var item = latestData[id];
         if (!item) return;
 
-        const dayPos = item.dailyChangePct >= 0;
-        const dayBadge = dayPos ? 'up-bg' : 'down-bg';
-        const daySign = dayPos ? '+' : '';
+        var dayPos = item.dailyChangePct >= 0;
+        var dayBadge = dayPos ? 'up-bg' : 'down-bg';
+        var daySign = dayPos ? '+' : '';
 
-        const weekPos = item.weeklyChangePct >= 0;
-        const weekBadge = weekPos ? 'up-bg' : 'down-bg';
-        const weekSign = weekPos ? '+' : '';
+        var weekPos = item.weeklyChangePct >= 0;
+        var weekBadge = weekPos ? 'up-bg' : 'down-bg';
+        var weekSign = weekPos ? '+' : '';
 
-        const formatNumber = num => num >= 1000 ? num.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
-                                    num >= 10 ? num.toFixed(2) : num.toFixed(4);
+        var formatNumber = function(num) {
+          return num >= 1000 ? num.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
+                 num >= 10 ? num.toFixed(2) : num.toFixed(4);
+        };
 
-        const priceStr = formatNumber(item.price);
+        var priceStr = formatNumber(item.price);
 
-        // Off-market Blue Badge with price, percentage difference, and session tag
-        let extHtml = '';
+        var extHtml = '';
         if (item.extPrice && item.extPrice > 0) {
-          const extPriceStr = formatNumber(item.extPrice);
-          const extSign = item.extChangePct >= 0 ? '+' : '';
-          const extPctStr = item.extChangePct !== null ? `${extSign}${item.extChangePct.toFixed(2)}%` : '';
-          extHtml = `
-            <span class="ext-price-badge">
-              <span class="ext-price">${extPriceStr}</span>
-              ${extPctStr ? `<span class="ext-pct">${extPctStr}</span>` : ''}
-              <span class="ext-label">${item.extLabel || 'EXT'}</span>
-            </span>
-          `;
+          var extPriceStr = formatNumber(item.extPrice);
+          var extSign = item.extChangePct >= 0 ? '+' : '';
+          var extPctStr = item.extChangePct !== null ? (extSign + item.extChangePct.toFixed(2) + '%') : '';
+          extHtml = '<span class="ext-price-badge">' +
+            '<span class="ext-price">' + extPriceStr + '</span>' +
+            (extPctStr ? '<span class="ext-pct">' + extPctStr + '</span>' : '') +
+            '<span class="ext-label">' + (item.extLabel || 'EXT') + '</span>' +
+          '</span>';
         }
 
-        let flashClass = '';
+        var flashClass = '';
         if (previousPrices[id] !== undefined && previousPrices[id] !== item.price) {
           flashClass = item.price > previousPrices[id] ? 'flash-up' : 'flash-down';
         }
         previousPrices[id] = item.price;
 
-        const daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
-        const weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
+        var daySvgId = 'day-' + id.replace(/[^a-zA-Z0-9]/g, '_');
+        var weekSvgId = 'week-' + id.replace(/[^a-zA-Z0-9]/g, '_');
 
-        const isWeekOpen = !!openWeekDrawers[id];
-        const daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
-        const weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
+        var isWeekOpen = !!openWeekDrawers[id];
+        var daySvg = buildSvg(daySvgId, item.daySeries, item.dailyPrevClose, true, item.sessionStart, item.sessionEnd);
+        var weekSvg = isWeekOpen ? buildSvg(weekSvgId, item.weekSeries, item.weeklyPrevClose, false) : '';
 
-        html += `
-          <div class="card" draggable="true" data-id="${item.id}">
-            <div class="card-topbar">
-              <div class="topbar-left">
-                <span class="drag-handle">⋮⋮</span>
-                <div class="reorder-btns">
-                  <button class="btn-ctrl" onclick="sendToTop('${item.id}')" title="Top">⤒</button>
-                  <button class="btn-ctrl" onclick="reorderItem('${item.id}', -1)" title="Up">▲</button>
-                  <button class="btn-ctrl" onclick="reorderItem('${item.id}', 1)" title="Down">▼</button>
-                  <button class="btn-ctrl" onclick="sendToBottom('${item.id}')" title="Bottom">⤓</button>
-                </div>
-                <span class="sym">${item.name}</span>
-                <span class="price-val ${flashClass}">${priceStr}</span>
-                ${extHtml}
-                <span class="badge ${dayBadge}">${daySign}${item.dailyChangePct.toFixed(2)}%</span>
-                <span class="sub">${item.sub}</span>
-              </div>
-              <div class="topbar-right">
-                <span id="${daySvgId}-readout" class="scrub-readout"></span>
-                <button class="week-pill ${isWeekOpen ? 'active' : ''}" onclick="toggleWeek('${item.id}')">1W</button>
-              </div>
-            </div>
-
-            <div class="chart-box">
-              <div class="svg-wrap">${daySvg}</div>
-            </div>
-
-            <div class="week-drawer ${isWeekOpen ? 'open' : ''}">
-              <div class="week-drawer-hdr">
-                <div style="display:flex; align-items:center; gap:6px;">
-                  <span class="badge ${weekBadge}">${weekSign}${item.weeklyChangePct.toFixed(2)}%</span>
-                  <span class="sub">5D Trend</span>
-                </div>
-                <span id="${weekSvgId}-readout" class="scrub-readout"></span>
-              </div>
-              <div class="chart-box">
-                <div class="svg-wrap">${weekSvg}</div>
-              </div>
-            </div>
-          </div>
-        `;
+        html += '<div class="card" draggable="true" data-id="' + item.id + '">' +
+          '<div class="card-topbar">' +
+            '<div class="topbar-left">' +
+              '<span class="drag-handle">⋮⋮</span>' +
+              '<div class="reorder-btns">' +
+                '<button class="btn-ctrl" onclick="sendToTop(\'' + item.id + '\')" title="Top">⤒</button>' +
+                '<button class="btn-ctrl" onclick="reorderItem(\'' + item.id + '\', -1)" title="Up">▲</button>' +
+                '<button class="btn-ctrl" onclick="reorderItem(\'' + item.id + '\', 1)" title="Down">▼</button>' +
+                '<button class="btn-ctrl" onclick="sendToBottom(\'' + item.id + '\')" title="Bottom">⤓</button>' +
+              '</div>' +
+              '<span class="sym">' + item.name + '</span>' +
+              '<span class="price-val ' + flashClass + '">' + priceStr + '</span>' +
+              extHtml +
+              '<span class="badge ' + dayBadge + '">' + daySign + item.dailyChangePct.toFixed(2) + '%</span>' +
+              '<span class="sub">' + item.sub + '</span>' +
+            '</div>' +
+            '<div class="topbar-right">' +
+              '<span id="' + daySvgId + '-readout" class="scrub-readout"></span>' +
+              '<button class="week-pill ' + (isWeekOpen ? 'active' : '') + '" onclick="toggleWeek(\'' + item.id + '\')">1W</button>' +
+            '</div>' +
+          '</div>' +
+          '<div class="chart-box"><div class="svg-wrap">' + daySvg + '</div></div>' +
+          '<div class="week-drawer ' + (isWeekOpen ? 'open' : '') + '">' +
+            '<div class="week-drawer-hdr">' +
+              '<div style="display:flex; align-items:center; gap:6px;">' +
+                '<span class="badge ' + weekBadge + '">' + weekSign + item.weeklyChangePct.toFixed(2) + '%</span>' +
+                '<span class="sub">5D Trend</span>' +
+              '</div>' +
+              '<span id="' + weekSvgId + '-readout" class="scrub-readout"></span>' +
+            '</div>' +
+            '<div class="chart-box"><div class="svg-wrap">' + weekSvg + '</div></div>' +
+          '</div>' +
+        '</div>';
       });
 
       container.innerHTML = html;
@@ -1008,10 +970,10 @@ app.get('/', (req, res) => {
 
     async function poll() {
       try {
-        const res = await fetch('/api/data');
-        const json = await res.json();
+        var res = await fetch('/api/data');
+        var json = await res.json();
         if (json.items && json.items.length) {
-          json.items.forEach(i => latestData[i.id] = i);
+          json.items.forEach(function(i) { latestData[i.id] = i; });
           renderList();
         }
       } catch (e) {
