@@ -35,46 +35,33 @@ const RATIO_PAIRS = [
 
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
+let isSyncing = false;
+const LAST_GOOD_MAP = {};
 
-// 1. Direct Multi-Quote Fetcher for Real-Time Extended Hours
-async function fetchAllQuotes(symbols) {
+// Robust fetch with strict timeout
+async function fetchWithTimeout(url, headers = {}, timeoutMs = 3500) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const url = 'https://query1.finance.yahoo.com/v7/finance/quote?symbols=' + symbols.map(encodeURIComponent).join(',');
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': 'application/json'
-      }
-    });
-    if (!res.ok) return {};
-    const json = await res.json();
-    const list = json.quoteResponse?.result || [];
-    const map = {};
-    for (const q of list) {
-      map[q.symbol] = q;
-    }
-    return map;
+    const res = await fetch(url, { signal: controller.signal, headers });
+    clearTimeout(timer);
+    return res;
   } catch (e) {
-    return {};
+    clearTimeout(timer);
+    return null;
   }
 }
 
-// 2. Webull Blue Ocean ATS Gateway Fetcher
-async function fetchBlueOceanQuote(webullId) {
+// 1. Blue Ocean ATS (Webull Gateway)
+async function fetchBlueOcean(webullId) {
   if (!webullId) return null;
+  const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + webullId;
+  const res = await fetchWithTimeout(url, {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'hl': 'en', 'gl': 'us', 'platform': 'pc'
+  }, 2000);
+  if (!res || !res.ok) return null;
   try {
-    const url = 'https://quotes-gw.webullfintech.com/api/quote/tickerRealTime/getQuote?tickerId=' + webullId;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(url, {
-      signal: controller.signal,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'hl': 'en', 'gl': 'us', 'platform': 'pc'
-      }
-    });
-    clearTimeout(timeout);
-    if (!res.ok) return null;
     const d = await res.json();
     if (d.nightPrice && parseFloat(d.nightPrice) > 0) {
       return { price: parseFloat(d.nightPrice), label: 'BOATS' };
@@ -86,220 +73,228 @@ async function fetchBlueOceanQuote(webullId) {
   return null;
 }
 
-// 3. 5-Day Intraday Candle History
-async function fetchTickerChart(symbol) {
+// 2. Yahoo Chart Feed (Candles + Off-Market Ticks)
+async function fetchTicker(symbol) {
   const url = 'https://query1.finance.yahoo.com/v8/finance/chart/' + encodeURIComponent(symbol) + '?range=5d&interval=5m&includePrePost=true';
-  const res = await fetch(url, {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
-  });
-  if (!res.ok) throw new Error('HTTP ' + res.status);
-  const json = await res.json();
-  const r = json.chart.result[0];
-  const meta = r.meta;
-  const times = r.timestamp || [];
-  const quotes = r.indicators.quote[0].close || [];
+  const res = await fetchWithTimeout(url, {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+    'Accept': '*/*'
+  }, 3500);
 
-  const history = [];
-  for (let i = 0; i < times.length; i++) {
-    if (quotes[i] !== null && quotes[i] !== undefined) {
-      history.push({ t: times[i], c: quotes[i] });
+  if (!res || !res.ok) return null;
+  try {
+    const json = await res.json();
+    if (!json.chart || !json.chart.result || !json.chart.result.length) return null;
+    const r = json.chart.result[0];
+    const meta = r.meta;
+    const times = r.timestamp || [];
+    const quotes = r.indicators?.quote?.[0]?.close || [];
+
+    const history = [];
+    for (let i = 0; i < times.length; i++) {
+      if (quotes[i] !== null && quotes[i] !== undefined) {
+        history.push({ t: times[i], c: quotes[i] });
+      }
     }
-  }
+    if (!history.length) return null;
 
-  const curPrice = meta.regularMarketPrice || (history.length ? history[history.length - 1].c : 0);
-  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
-  const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
+    const curPrice = meta.regularMarketPrice || history[history.length - 1].c;
+    const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || history[0].c;
+    const weeklyPrevClose = meta.chartPreviousClose || history[0].c;
 
-  const reg = meta.currentTradingPeriod?.regular;
-  let sessionStart = reg?.start;
-  let sessionEnd = reg?.end;
+    const reg = meta.currentTradingPeriod?.regular;
+    let sessionStart = reg?.start;
+    let sessionEnd = reg?.end;
 
-  const now = Math.floor(Date.now() / 1000);
-  const lastTick = history.length ? history[history.length - 1] : null;
-  if (!sessionStart) {
-    sessionStart = (lastTick?.t || now) - 23400;
-    sessionEnd = lastTick?.t || now;
-  }
+    const now = Math.floor(Date.now() / 1000);
+    const lastTick = history[history.length - 1];
 
-  return {
-    symbol,
-    price: curPrice,
-    dailyPrevClose,
-    weeklyPrevClose,
-    sessionStart,
-    sessionEnd,
-    history
-  };
-}
+    if (!sessionStart || lastTick.t < sessionStart - 3600) {
+      sessionStart = lastTick.t - 23400;
+      sessionEnd = lastTick.t;
+    }
 
-async function syncAll() {
-  const allSymbols = BASE_SYMBOLS.map(s => s.sym);
-
-  const [chartMap, quotesMap, boMap] = await Promise.all([
-    (async () => {
-      const map = {};
-      await Promise.allSettled(BASE_SYMBOLS.map(async (item) => {
-        try { map[item.sym] = await fetchTickerChart(item.sym); } catch (e) {}
-      }));
-      return map;
-    })(),
-    fetchAllQuotes(allSymbols),
-    (async () => {
-      const map = {};
-      await Promise.allSettled(BASE_SYMBOLS.filter(s => s.isStock && s.webullId).map(async (item) => {
-        try { map[item.sym] = await fetchBlueOceanQuote(item.webullId); } catch (e) {}
-      }));
-      return map;
-    })()
-  ]);
-
-  const results = [];
-
-  // 1. Process Individual Symbols
-  for (const item of BASE_SYMBOLS) {
-    const c = chartMap[item.sym];
-    if (!c || !c.history.length) continue;
-
-    const q = quotesMap[item.sym] || {};
-    const bo = boMap[item.sym];
-
-    const curPrice = q.regularMarketPrice || c.price;
-    const dailyPrevClose = q.regularMarketPreviousClose || c.dailyPrevClose;
-    const weeklyPrevClose = c.weeklyPrevClose;
-
-    const dailyChangePct = ((curPrice - dailyPrevClose) / dailyPrevClose) * 100;
-    const weeklyChangePct = ((curPrice - weeklyPrevClose) / weeklyPrevClose) * 100;
-
-    const dayTicks = c.history.filter(h => h.t >= (c.sessionStart - 300) && h.t <= (c.sessionEnd + 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : c.history.slice(-78);
-
+    // Extended hours tick extraction
     let extPrice = null;
-    let extChangePct = null;
     let extLabel = '';
 
-    if (bo && bo.price && Math.abs(bo.price - curPrice) > 0.0001) {
-      extPrice = bo.price;
-      extLabel = bo.label;
-      extChangePct = ((extPrice - curPrice) / curPrice) * 100;
-    } else if (q.postMarketPrice && q.postMarketPrice > 0 && Math.abs(q.postMarketPrice - curPrice) > 0.0001) {
-      extPrice = q.postMarketPrice;
-      extLabel = 'AH';
-      extChangePct = q.postMarketChangePercent !== undefined 
-        ? q.postMarketChangePercent 
-        : ((extPrice - curPrice) / curPrice) * 100;
-    } else if (q.preMarketPrice && q.preMarketPrice > 0 && Math.abs(q.preMarketPrice - curPrice) > 0.0001) {
-      extPrice = q.preMarketPrice;
-      extLabel = 'PRE';
-      extChangePct = q.preMarketChangePercent !== undefined 
-        ? q.preMarketChangePercent 
-        : ((extPrice - curPrice) / curPrice) * 100;
-    } else if (c.history.length) {
-      const lastTick = c.history[c.history.length - 1];
-      if (lastTick.t > (c.sessionEnd + 300) && Math.abs(lastTick.c - curPrice) > 0.0001) {
+    if (now > sessionEnd || now < sessionStart) {
+      if (meta.postMarketPrice && Math.abs(meta.postMarketPrice - curPrice) > 0.0001) {
+        extPrice = meta.postMarketPrice;
+        extLabel = 'AH';
+      } else if (meta.preMarketPrice && Math.abs(meta.preMarketPrice - curPrice) > 0.0001) {
+        extPrice = meta.preMarketPrice;
+        extLabel = 'PRE';
+      } else if (lastTick.t > (sessionEnd + 120) && Math.abs(lastTick.c - curPrice) > 0.0001) {
         extPrice = lastTick.c;
         extLabel = 'AH';
-        extChangePct = ((extPrice - curPrice) / curPrice) * 100;
       }
     }
 
-    results.push({
-      id: item.name,
-      name: item.name,
-      sub: item.sub,
+    return {
+      symbol,
       price: curPrice,
       extPrice,
-      extChangePct,
       extLabel,
       dailyPrevClose,
       weeklyPrevClose,
-      dailyChangePct,
-      weeklyChangePct,
-      sessionStart: c.sessionStart,
-      sessionEnd: c.sessionEnd,
-      daySeries: dayHistory,
-      weekSeries: c.history
-    });
-  }
-
-  // 2. Process Ratio Spreads
-  for (const pair of RATIO_PAIRS) {
-    const c1 = chartMap[pair.t1];
-    const c2 = chartMap[pair.t2];
-    if (!c1 || !c2 || !c1.history.length || !c2.history.length) continue;
-
-    const q1 = quotesMap[pair.t1] || {};
-    const q2 = quotesMap[pair.t2] || {};
-
-    const p1 = q1.regularMarketPrice || c1.price;
-    const p2 = q2.regularMarketPrice || c2.price;
-    if (p2 <= 0) continue;
-
-    const curRatio = p1 / p2;
-    const dailyPrevRatio = (q1.regularMarketPreviousClose || c1.dailyPrevClose) / (q2.regularMarketPreviousClose || c2.dailyPrevClose);
-    const weeklyPrevRatio = c1.weeklyPrevClose / c2.weeklyPrevClose;
-
-    const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
-    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
-
-    const map2 = new Map(c2.history.map(h => [h.t, h.c]));
-    const matched = c1.history
-      .filter(h => map2.has(h.t))
-      .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
-
-    const sessionStart = Math.max(c1.sessionStart, c2.sessionStart);
-    const sessionEnd = Math.max(c1.sessionEnd, c2.sessionEnd);
-    const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
-    const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
-
-    const s1 = results.find(r => r.id === pair.t1);
-    const s2 = results.find(r => r.id === pair.t2);
-
-    let extRatio = null;
-    let extChangePct = null;
-    let extLabel = '';
-
-    if (s1 && s2 && (s1.extPrice || s2.extPrice)) {
-      const activeP1 = s1.extPrice || s1.price;
-      const activeP2 = s2.extPrice || s2.price;
-      if (activeP2 > 0) {
-        extRatio = activeP1 / activeP2;
-        extChangePct = ((extRatio - curRatio) / curRatio) * 100;
-        extLabel = (s1.extLabel === 'BOATS' || s2.extLabel === 'BOATS') 
-          ? 'BOATS' 
-          : (s1.extLabel || s2.extLabel || 'EXT');
-      }
-    }
-
-    const id = pair.t1 + '/' + pair.t2;
-    results.push({
-      id,
-      name: id,
-      sub: 'Spread',
-      price: curRatio,
-      extPrice: extRatio,
-      extChangePct,
-      extLabel,
-      dailyPrevClose: dailyPrevRatio,
-      weeklyPrevClose: weeklyPrevRatio,
-      dailyChangePct,
-      weeklyChangePct,
       sessionStart,
       sessionEnd,
-      daySeries: dayHistory,
-      weekSeries: matched
-    });
-  }
-
-  if (results.length > 0) {
-    CACHED_DATA = results;
-    LAST_UPDATE = Date.now();
+      history
+    };
+  } catch (e) {
+    return null;
   }
 }
 
-syncAll();
-setInterval(syncAll, 3000);
+async function syncAll() {
+  if (isSyncing) return;
+  isSyncing = true;
 
-app.get('/api/data', (req, res) => {
+  try {
+    const rawMap = {};
+    const boMap = {};
+
+    // Parallel fetch with auto-timeout
+    await Promise.allSettled([
+      ...BASE_SYMBOLS.map(async (item) => {
+        const d = await fetchTicker(item.sym);
+        if (d) {
+          rawMap[item.sym] = d;
+          LAST_GOOD_MAP[item.sym] = d;
+        } else if (LAST_GOOD_MAP[item.sym]) {
+          rawMap[item.sym] = LAST_GOOD_MAP[item.sym];
+        }
+      }),
+      ...BASE_SYMBOLS.filter(s => s.isStock && s.webullId).map(async (item) => {
+        const bo = await fetchBlueOcean(item.webullId);
+        if (bo) boMap[item.sym] = bo;
+      })
+    ]);
+
+    const results = [];
+
+    // 1. Process Individual Tickers
+    for (const item of BASE_SYMBOLS) {
+      const d = rawMap[item.sym];
+      if (!d || !d.history.length) continue;
+
+      const curPrice = d.price;
+      const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
+      const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
+
+      const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300) && h.t <= (d.sessionEnd + 300));
+      const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
+
+      const bo = boMap[item.sym];
+      const activeExtPrice = bo ? bo.price : d.extPrice;
+      const activeExtLabel = bo ? bo.label : d.extLabel;
+
+      let extChangePct = null;
+      if (activeExtPrice && activeExtPrice > 0 && Math.abs(activeExtPrice - curPrice) > 0.0001) {
+        extChangePct = ((activeExtPrice - curPrice) / curPrice) * 100;
+      }
+
+      results.push({
+        id: item.name,
+        name: item.name,
+        sub: item.sub,
+        price: curPrice,
+        extPrice: extChangePct !== null ? activeExtPrice : null,
+        extChangePct,
+        extLabel: activeExtLabel,
+        dailyPrevClose: d.dailyPrevClose,
+        weeklyPrevClose: d.weeklyPrevClose,
+        dailyChangePct,
+        weeklyChangePct,
+        sessionStart: d.sessionStart,
+        sessionEnd: d.sessionEnd,
+        daySeries: dayHistory,
+        weekSeries: d.history
+      });
+    }
+
+    // 2. Process Ratio Spreads
+    for (const pair of RATIO_PAIRS) {
+      const d1 = rawMap[pair.t1];
+      const d2 = rawMap[pair.t2];
+      if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
+
+      const curRatio = d1.price / d2.price;
+      const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
+      const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+
+      const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
+      const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
+
+      const map2 = new Map(d2.history.map(h => [h.t, h.c]));
+      const matched = d1.history
+        .filter(h => map2.has(h.t))
+        .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
+
+      const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
+      const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
+      const dayTicks = matched.filter(m => m.t >= (sessionStart - 300) && m.t <= (sessionEnd + 300));
+      const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
+
+      const bo1 = boMap[pair.t1];
+      const bo2 = boMap[pair.t2];
+      const p1 = (bo1 ? bo1.price : d1.extPrice) || d1.price;
+      const p2 = (bo2 ? bo2.price : d2.extPrice) || d2.price;
+
+      let extRatio = null;
+      let extChangePct = null;
+      let extLabel = '';
+
+      if ((bo1 || d1.extPrice || bo2 || d2.extPrice) && p2 > 0) {
+        const candidate = p1 / p2;
+        if (Math.abs(candidate - curRatio) > 0.0001) {
+          extRatio = candidate;
+          extChangePct = ((extRatio - curRatio) / curRatio) * 100;
+          extLabel = (bo1?.label === 'BOATS' || bo2?.label === 'BOATS') ? 'BOATS' : (bo1?.label || bo2?.label || d1.extLabel || d2.extLabel || 'EXT');
+        }
+      }
+
+      const id = pair.t1 + '/' + pair.t2;
+      results.push({
+        id,
+        name: id,
+        sub: 'Spread',
+        price: curRatio,
+        extPrice: extRatio,
+        extChangePct,
+        extLabel,
+        dailyPrevClose: dailyPrevRatio,
+        weeklyPrevClose: weeklyPrevRatio,
+        dailyChangePct,
+        weeklyChangePct,
+        sessionStart,
+        sessionEnd,
+        daySeries: dayHistory,
+        weekSeries: matched
+      });
+    }
+
+    if (results.length > 0) {
+      CACHED_DATA = results;
+      LAST_UPDATE = Date.now();
+    }
+  } finally {
+    isSyncing = false;
+  }
+}
+
+// Non-overlapping loop ensures requests never pile up
+async function workerLoop() {
+  await syncAll();
+  setTimeout(workerLoop, 2500);
+}
+workerLoop();
+
+app.get('/api/data', async (req, res) => {
+  if (!CACHED_DATA.length) {
+    await syncAll();
+  }
   res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
 });
 
@@ -426,6 +421,7 @@ app.get('/', (req, res) => {
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
     .dot { width: 7px; height: 7px; background: #00c805; border-radius: 50%; box-shadow: 0 0 6px #00c805; }
+    .dot.syncing { background: #eab308; box-shadow: 0 0 6px #eab308; }
 
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .action-btn, select.theme-select {
@@ -443,6 +439,14 @@ app.get('/', (req, res) => {
       display: flex;
       flex-direction: column;
       gap: 8px;
+    }
+
+    .loading-notice {
+      text-align: center;
+      padding: 50px 20px;
+      color: var(--text-sub);
+      font-size: 0.88rem;
+      font-weight: 600;
     }
 
     .card {
@@ -613,7 +617,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status"><div class="dot"></div> LIVE (24H EXT)</div>
+      <div class="status"><div class="dot" id="liveDot"></div> <span id="statusTxt">CONNECTING</span></div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -628,14 +632,17 @@ app.get('/', (req, res) => {
     </div>
   </header>
 
-  <div class="watchlist card-view" id="watchlist"></div>
+  <div class="watchlist card-view" id="watchlist">
+    <div class="loading-notice" id="loadingNotice">Loading real-time market data...</div>
+  </div>
 
   <script>
     var savedOrder = JSON.parse(localStorage.getItem('user_order') || '[]');
     var previousPrices = {};
-    var latestData = {};
+    var latestData = JSON.parse(localStorage.getItem('cached_ratios') || '{}');
     var openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     var allWeekOpen = false;
+    window.CHART_STORE = {};
 
     var currentView = localStorage.getItem('rw_view') || 'card';
     applyViewMode(currentView);
@@ -701,6 +708,9 @@ app.get('/', (req, res) => {
         return { x: Number(x.toFixed(1)), y: Number(y.toFixed(1)), val: s.c, t: s.t };
       });
 
+      // Save to memory map for instant 1:1 scrubbing without DOM stringification overhead
+      window.CHART_STORE[id] = { pts: pts, padLeft: padLeft, cw: cw };
+
       var strokePath = 'M ' + pts.map(function(p) { return p.x + ',' + p.y; }).join(' L ');
       var areaPath = strokePath + ' L ' + pts[pts.length - 1].x + ',' + (padTop + ch) + ' L ' + pts[0].x + ',' + (padTop + ch) + ' Z';
 
@@ -756,7 +766,6 @@ app.get('/', (req, res) => {
       }
 
       return '<svg viewBox="0 0 ' + w + ' ' + h + '" id="' + id + '" ' +
-        'data-pad-left="' + padLeft + '" data-cw="' + cw + '" data-points=\'' + JSON.stringify(pts) + '\' ' +
         'onpointermove="scrubExact(event, \'' + id + '\')" onpointerleave="leaveExact(\'' + id + '\')">' +
         '<line class="grid-line" x1="' + padLeft + '" y1="' + padTop + '" x2="' + (padLeft + cw) + '" y2="' + padTop + '" />' +
         '<line class="grid-line" x1="' + padLeft + '" y1="' + midY.toFixed(1) + '" x2="' + (padLeft + cw) + '" y2="' + midY.toFixed(1) + '" />' +
@@ -780,25 +789,23 @@ app.get('/', (req, res) => {
     }
 
     function scrubExact(e, id) {
+      var store = window.CHART_STORE[id];
+      if (!store) return;
       var svg = document.getElementById(id);
       if (!svg) return;
-      var pts = JSON.parse(svg.getAttribute('data-points') || '[]');
-      if (!pts.length) return;
-
-      var padLeft = parseFloat(svg.getAttribute('data-pad-left'));
-      var cw = parseFloat(svg.getAttribute('data-cw'));
 
       var pt = svg.createSVGPoint();
       pt.x = e.clientX;
       pt.y = e.clientY;
       var svgP = pt.matrixTransform(svg.getScreenCTM().inverse());
 
+      var pts = store.pts;
       var closest = pts[0];
       var minDiff = 999999;
-      pts.forEach(function(p) {
-        var diff = Math.abs(p.x - svgP.x);
-        if (diff < minDiff) { minDiff = diff; closest = p; }
-      });
+      for (var i = 0; i < pts.length; i++) {
+        var diff = Math.abs(pts[i].x - svgP.x);
+        if (diff < minDiff) { minDiff = diff; closest = pts[i]; }
+      }
 
       var cursor = document.getElementById(id + '-cursor');
       var vline = document.getElementById(id + '-vline');
@@ -874,13 +881,14 @@ app.get('/', (req, res) => {
 
     function renderList() {
       var container = document.getElementById('watchlist');
-      if (!Object.keys(latestData).length) return;
+      var keys = Object.keys(latestData);
+      if (!keys.length) return;
 
       if (!savedOrder.length) {
-        savedOrder = Object.keys(latestData);
+        savedOrder = keys;
         localStorage.setItem('user_order', JSON.stringify(savedOrder));
       } else {
-        Object.keys(latestData).forEach(function(k) {
+        keys.forEach(function(k) {
           if (savedOrder.indexOf(k) === -1) savedOrder.push(k);
         });
       }
@@ -972,17 +980,33 @@ app.get('/', (req, res) => {
       try {
         var res = await fetch('/api/data');
         var json = await res.json();
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+
         if (json.items && json.items.length) {
           json.items.forEach(function(i) { latestData[i.id] = i; });
+          localStorage.setItem('cached_ratios', JSON.stringify(latestData));
           renderList();
+          dot.className = 'dot';
+          txt.textContent = 'LIVE (' + json.items.length + '/' + json.items.length + ')';
+        } else {
+          dot.className = 'dot syncing';
+          txt.textContent = 'SYNCING';
         }
       } catch (e) {
-        console.error('Polling error', e);
+        var dot = document.getElementById('liveDot');
+        var txt = document.getElementById('statusTxt');
+        dot.className = 'dot syncing';
+        txt.textContent = 'RECONNECTING';
       }
     }
 
+    // 1. Instant paint from device cache
+    renderList();
+
+    // 2. Poll every 2 seconds
     poll();
-    setInterval(poll, 1500);
+    setInterval(poll, 2000);
   </script>
 </body>
 </html>`);
