@@ -3,21 +3,21 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 const BASE_SYMBOLS = [
-  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil', isCrypto: false, isCommodity: true },
-  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold', isCrypto: false, isCommodity: true },
-  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver', isCrypto: false, isCommodity: true },
-  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar', isCrypto: true, isCommodity: false },
-  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc', isCrypto: false, isCommodity: false },
-  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.', isCrypto: false, isCommodity: false },
-  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED', isCrypto: false, isCommodity: false },
-  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.', isCrypto: false, isCommodity: false },
-  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.', isCrypto: false, isCommodity: false },
-  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation', isCrypto: false, isCommodity: false },
-  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.', isCrypto: false, isCommodity: false },
-  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group', isCrypto: false, isCommodity: false },
-  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.', isCrypto: false, isCommodity: false },
-  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.', isCrypto: false, isCommodity: false },
-  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.', isCrypto: false, isCommodity: false }
+  { sym: 'CL=F', name: 'USOIL', sub: 'CFDs on WTI Crude Oil' },
+  { sym: 'GC=F', name: 'GOLD', sub: 'CFDs on Gold' },
+  { sym: 'SI=F', name: 'SILVER', sub: 'CFDs on Silver' },
+  { sym: 'BTC-USD', name: 'BTCUSD', sub: 'Bitcoin / U.S. Dollar' },
+  { sym: 'MSTR', name: 'MSTR', sub: 'Strategy Inc' },
+  { sym: 'MARA', name: 'MARA', sub: 'MARA Holdings, Inc.' },
+  { sym: 'IREN', name: 'IREN', sub: 'IREN LIMITED' },
+  { sym: 'NBIS', name: 'NBIS', sub: 'Nebius Group N.V.' },
+  { sym: 'CRWV', name: 'CRWV', sub: 'CoreWeave, Inc.' },
+  { sym: 'ORCL', name: 'ORCL', sub: 'Oracle Corporation' },
+  { sym: 'CIFR', name: 'CIFR', sub: 'Cipher Digital Inc.' },
+  { sym: 'BTDR', name: 'BTDR', sub: 'Bitdeer Technologies Group' },
+  { sym: 'SMCI', name: 'SMCI', sub: 'Super Micro Computer, Inc.' },
+  { sym: 'SLNH', name: 'SLNH', sub: 'Soluna Holdings, Inc.' },
+  { sym: 'WULF', name: 'WULF', sub: 'TeraWulf Inc.' }
 ];
 
 const RATIO_PAIRS = [
@@ -36,28 +36,51 @@ const RATIO_PAIRS = [
 let CACHED_DATA = [];
 let LAST_UPDATE = 0;
 
-// Filters ticks strictly to regular cash session (09:30 - 16:00 ET)
-function isRegularUsTick(ts) {
-  const d = new Date(ts * 1000);
-  const etStr = d.toLocaleString('en-US', { timeZone: 'America/New_York' });
-  const et = new Date(etStr);
-  const day = et.getDay();
-  if (day === 0 || day === 6) return false;
-  const mins = et.getHours() * 60 + et.getMinutes();
-  return mins >= (9 * 60 + 30) && mins <= (16 * 60);
+const HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+};
+
+// 1. Dedicated Real-Time Quote Engine (Pulls Pre/Post Market Prices)
+async function fetchQuotesBatch() {
+  const symbols = BASE_SYMBOLS.map(s => s.sym).join(',');
+  const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbols)}`;
+  try {
+    const res = await fetch(url, { headers: HEADERS });
+    if (!res.ok) return {};
+    const json = await res.json();
+    const results = json.quoteResponse?.result || [];
+    const map = {};
+    
+    results.forEach(q => {
+      let extPrice = null;
+      let extType = null;
+      const state = q.marketState; // 'PRE', 'POST', 'REGULAR', 'CLOSED'
+
+      if ((state === 'PRE' || state === 'PREPRE') && q.preMarketPrice) {
+        extPrice = q.preMarketPrice;
+        extType = 'PM';
+      } else if ((state === 'POST' || state === 'POSTPOST' || state === 'CLOSED') && q.postMarketPrice) {
+        extPrice = q.postMarketPrice;
+        extType = 'AH';
+      }
+
+      map[q.symbol] = {
+        extPrice,
+        extType,
+        liveRegularPrice: q.regularMarketPrice
+      };
+    });
+    return map;
+  } catch (e) {
+    console.error('Quote batch failed:', e.message);
+    return {};
+  }
 }
 
-async function fetchTicker(item) {
-  const symbol = item.sym;
-  // Cache-busting URL parameter ensures fresh quotes from Yahoo CDN
-  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=true&nocache=${Date.now()}`;
-  const res = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
-      'Pragma': 'no-cache'
-    }
-  });
+// 2. Chart Engine (Strictly for regular hours calculations & SVGs)
+async function fetchChart(symbol) {
+  const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=5d&interval=5m&includePrePost=false`;
+  const res = await fetch(url, { headers: HEADERS });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const json = await res.json();
   const r = json.chart.result[0];
@@ -65,148 +88,127 @@ async function fetchTicker(item) {
   const times = r.timestamp || [];
   const quotes = r.indicators.quote[0].close || [];
 
-  const rawHistory = [];
+  const history = [];
   for (let i = 0; i < times.length; i++) {
     if (quotes[i] !== null && quotes[i] !== undefined) {
-      rawHistory.push({ t: times[i], c: quotes[i] });
+      history.push({ t: times[i], c: quotes[i] });
     }
   }
 
-  // 1. Regular market calculations only
-  const regPrice = meta.regularMarketPrice || (rawHistory.length ? rawHistory[rawHistory.length - 1].c : 0);
-  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (rawHistory.length ? rawHistory[0].c : 1);
-  const weeklyPrevClose = meta.chartPreviousClose || (rawHistory.length ? rawHistory[0].c : 1);
+  const curPrice = meta.regularMarketPrice || (history.length ? history[history.length - 1].c : 0);
+  const dailyPrevClose = meta.previousClose || meta.regularMarketPreviousClose || (history.length ? history[0].c : 1);
+  const weeklyPrevClose = meta.chartPreviousClose || (history.length ? history[0].c : 1);
 
-  // 2. Off-market (extended) price detection
-  let extPrice = null;
-  const lastTick = rawHistory.length ? rawHistory[rawHistory.length - 1] : null;
+  const reg = meta.currentTradingPeriod?.regular;
+  let sessionStart = reg?.start;
+  let sessionEnd = reg?.end;
 
-  if (meta.postMarketPrice && Math.abs(meta.postMarketPrice - regPrice) > 0.0001) {
-    extPrice = meta.postMarketPrice;
-  } else if (meta.preMarketPrice && Math.abs(meta.preMarketPrice - regPrice) > 0.0001) {
-    extPrice = meta.preMarketPrice;
-  } else if (lastTick && !item.isCrypto && !item.isCommodity) {
-    if (!isRegularUsTick(lastTick.t) && Math.abs(lastTick.c - regPrice) > 0.0001) {
-      extPrice = lastTick.c;
+  const lastTickT = history.length ? history[history.length - 1].t : 0;
+  if (!sessionStart || lastTickT < sessionStart - 3600) {
+    const lastDate = new Date(lastTickT * 1000).toDateString();
+    const sameDay = history.filter(h => new Date(h.t * 1000).toDateString() === lastDate);
+    if (sameDay.length) {
+      sessionStart = sameDay[0].t;
+      sessionEnd = sessionStart + 23400;
+    } else {
+      sessionStart = lastTickT - 23400;
+      sessionEnd = lastTickT;
     }
   }
 
-  // 3. Strictly isolate regular ticks for charts (no pre/post/overnight in candles)
-  let regHistory = rawHistory;
-  if (!item.isCrypto && !item.isCommodity) {
-    regHistory = rawHistory.filter(h => isRegularUsTick(h.t));
-  }
-
-  // Determine latest regular day boundary
-  let daySeries = [];
-  let sStart = 0;
-  let sEnd = 0;
-
-  if (regHistory.length > 0) {
-    const lastRegT = regHistory[regHistory.length - 1].t;
-    const lastDateStr = new Date(lastRegT * 1000).toDateString();
-    daySeries = regHistory.filter(h => new Date(h.t * 1000).toDateString() === lastDateStr);
-
-    if (daySeries.length > 0) {
-      sStart = daySeries[0].t;
-      sEnd = sStart + 23400; // Standard 6.5h regular session (09:30 - 16:00 ET)
-    }
-  }
-
-  return {
-    symbol,
-    price: regPrice,
-    extPrice,
-    dailyPrevClose,
-    weeklyPrevClose,
-    sessionStart: sStart,
-    sessionEnd: sEnd,
-    daySeries,
-    weekSeries: regHistory
-  };
+  return { symbol, price: curPrice, dailyPrevClose, weeklyPrevClose, sessionStart, sessionEnd, history };
 }
 
 async function syncAll() {
-  const map = {};
-  await Promise.allSettled(
-    BASE_SYMBOLS.map(async (item) => {
+  const [quoteMap, ...chartResults] = await Promise.all([
+    fetchQuotesBatch(),
+    ...BASE_SYMBOLS.map(async (item) => {
       try {
-        map[item.name] = await fetchTicker(item);
+        return await fetchChart(item.sym);
       } catch (e) {
-        console.error(`Error loading ${item.sym}:`, e.message);
+        return null;
       }
     })
-  );
+  ]);
+
+  const map = {};
+  chartResults.forEach(d => {
+    if (d) map[d.symbol] = d;
+  });
 
   const results = [];
 
-  // Base assets
+  // 1. Process Base Singles
   for (const item of BASE_SYMBOLS) {
-    const d = map[item.name];
-    if (!d || !d.daySeries.length) continue;
+    const d = map[item.sym];
+    if (!d || !d.history.length) continue;
 
-    const dailyChangePct = ((d.price - d.dailyPrevClose) / d.dailyPrevClose) * 100;
-    const weeklyChangePct = ((d.price - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
+    const q = quoteMap[item.sym] || {};
+    const curPrice = q.liveRegularPrice || d.price;
+    const dailyChangePct = ((curPrice - d.dailyPrevClose) / d.dailyPrevClose) * 100;
+    const weeklyChangePct = ((curPrice - d.weeklyPrevClose) / d.weeklyPrevClose) * 100;
 
-    let extChangePct = null;
-    if (d.extPrice && d.price > 0) {
-      extChangePct = ((d.extPrice - d.price) / d.price) * 100;
-    }
+    const dayTicks = d.history.filter(h => h.t >= (d.sessionStart - 300));
+    const dayHistory = dayTicks.length > 3 ? dayTicks : d.history.slice(-78);
 
     results.push({
       id: item.name,
       name: item.name,
       sub: item.sub,
-      price: d.price,
-      extPrice: d.extPrice,
-      extChangePct,
+      price: curPrice,
+      extPrice: q.extPrice || null,
+      extType: q.extType || null,
       dailyPrevClose: d.dailyPrevClose,
       weeklyPrevClose: d.weeklyPrevClose,
       dailyChangePct,
       weeklyChangePct,
       sessionStart: d.sessionStart,
       sessionEnd: d.sessionEnd,
-      daySeries: d.daySeries,
-      weekSeries: d.weekSeries
+      daySeries: dayHistory,
+      weekSeries: d.history
     });
   }
 
-  // Ratios (Pure regular session calculations)
+  // 2. Process Ratio Spreads
   for (const pair of RATIO_PAIRS) {
     const d1 = map[pair.t1];
     const d2 = map[pair.t2];
-    if (!d1 || !d2 || !d1.daySeries.length || !d2.daySeries.length) continue;
+    if (!d1 || !d2 || !d1.history.length || !d2.history.length) continue;
 
-    // Regular ratio
-    const curRatio = d1.price / d2.price;
-    const prevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
-    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+    const q1 = quoteMap[pair.t1] || {};
+    const q2 = quoteMap[pair.t2] || {};
 
-    const dailyChangePct = ((curRatio - prevRatio) / prevRatio) * 100;
-    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
-
-    // Extended ratio (only if either stock has an active off-market price)
-    let extRatio = null;
-    let extRatioPct = null;
-    if (d1.extPrice || d2.extPrice) {
-      const p1 = d1.extPrice || d1.price;
-      const p2 = d2.extPrice || d2.price;
-      if (p2 > 0) {
-        extRatio = p1 / p2;
-        extRatioPct = ((extRatio - curRatio) / curRatio) * 100;
-      }
-    }
-
-    // Match regular intraday ticks for ratio chart
-    const map2 = new Map(d2.daySeries.map(h => [h.t, h.c]));
-    const matchedDay = d1.daySeries
+    const map2 = new Map(d2.history.map(h => [h.t, h.c]));
+    const matched = d1.history
       .filter(h => map2.has(h.t))
       .map(h => ({ t: h.t, c: h.c / map2.get(h.t) }));
 
-    const map2Week = new Map(d2.weekSeries.map(h => [h.t, h.c]));
-    const matchedWeek = d1.weekSeries
-      .filter(h => map2Week.has(h.t))
-      .map(h => ({ t: h.t, c: h.c / map2Week.get(h.t) }));
+    if (!matched.length) continue;
+
+    const p1 = q1.liveRegularPrice || d1.price;
+    const p2 = q2.liveRegularPrice || d2.price;
+    const curRatio = p2 > 0 ? p1 / p2 : matched[matched.length - 1].c;
+
+    // Calculate synthetic off-market ratio if either has an extended price
+    let extRatio = null;
+    let extType = null;
+    const e1 = q1.extPrice || p1;
+    const e2 = q2.extPrice || p2;
+    if (q1.extPrice || q2.extPrice) {
+      extRatio = e2 > 0 ? e1 / e2 : null;
+      extType = q1.extType || q2.extType || 'EXT';
+    }
+
+    const dailyPrevRatio = d1.dailyPrevClose / d2.dailyPrevClose;
+    const weeklyPrevRatio = d1.weeklyPrevClose / d2.weeklyPrevClose;
+
+    const dailyChangePct = ((curRatio - dailyPrevRatio) / dailyPrevRatio) * 100;
+    const weeklyChangePct = ((curRatio - weeklyPrevRatio) / weeklyPrevRatio) * 100;
+
+    const sessionStart = Math.max(d1.sessionStart, d2.sessionStart);
+    const sessionEnd = Math.max(d1.sessionEnd, d2.sessionEnd);
+    const dayTicks = matched.filter(m => m.t >= (sessionStart - 300));
+    const dayHistory = dayTicks.length > 3 ? dayTicks : matched.slice(-78);
 
     const id = `${pair.t1}/${pair.t2}`;
     results.push({
@@ -215,15 +217,15 @@ async function syncAll() {
       sub: 'Spread',
       price: curRatio,
       extPrice: extRatio,
-      extChangePct: extRatioPct,
-      dailyPrevClose: prevRatio,
+      extType: extType,
+      dailyPrevClose: dailyPrevRatio,
       weeklyPrevClose: weeklyPrevRatio,
       dailyChangePct,
       weeklyChangePct,
-      sessionStart: Math.max(d1.sessionStart, d2.sessionStart),
-      sessionEnd: Math.max(d1.sessionEnd, d2.sessionEnd),
-      daySeries: matchedDay.length ? matchedDay : d1.daySeries,
-      weekSeries: matchedWeek.length ? matchedWeek : d1.weekSeries
+      sessionStart: sessionStart,
+      sessionEnd: sessionEnd,
+      daySeries: dayHistory,
+      weekSeries: matched
     });
   }
 
@@ -233,17 +235,11 @@ async function syncAll() {
   }
 }
 
-// Low-latency polling every 2.5 seconds
 syncAll();
 setInterval(syncAll, 2500);
 
-// API endpoint with aggressive anti-cache headers
 app.get('/api/data', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-  res.setHeader('Pragma', 'no-cache');
-  res.setHeader('Expires', '0');
-  res.setHeader('Surrogate-Control', 'no-store');
-  res.json({ updated: LAST_UPDATE, serverTime: Date.now(), items: CACHED_DATA });
+  res.json({ updated: LAST_UPDATE, items: CACHED_DATA });
 });
 
 app.get('/manifest.json', (req, res) => {
@@ -282,10 +278,10 @@ app.get('/', (req, res) => {
       --base: #373e54;
       --btn-bg: #141722;
       --btn-border: #23283a;
-      --blue-ext: #38bdf8;
-      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
+      --ext-color: #38bdf8;
+      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="darkgray"] {
       --bg: #111216;
@@ -299,10 +295,10 @@ app.get('/', (req, res) => {
       --base: #42495d;
       --btn-bg: #22242c;
       --btn-border: #313542;
-      --blue-ext: #38bdf8;
-      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(0, 230, 100, 0.85);
       --flash-down: rgba(255, 60, 60, 0.85);
+      --ext-color: #38bdf8;
+      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="navy"] {
       --bg: #090e1a;
@@ -316,10 +312,10 @@ app.get('/', (req, res) => {
       --base: #3b4252;
       --btn-bg: #1e293b;
       --btn-border: #334155;
-      --blue-ext: #38bdf8;
-      --blue-ext-bg: rgba(56, 189, 248, 0.15);
       --flash-up: rgba(16, 185, 129, 0.85);
       --flash-down: rgba(239, 68, 68, 0.85);
+      --ext-color: #38bdf8;
+      --ext-bg: rgba(56, 189, 248, 0.14);
     }
     :root[data-theme="warm"] {
       --bg: #f3efe6;
@@ -333,10 +329,10 @@ app.get('/', (req, res) => {
       --base: #b4bccb;
       --btn-bg: #ebe5d8;
       --btn-border: #dcd3bf;
-      --blue-ext: #0284c7;
-      --blue-ext-bg: rgba(2, 132, 199, 0.15);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
+      --ext-color: #0284c7;
+      --ext-bg: rgba(2, 132, 199, 0.12);
     }
     :root[data-theme="light"] {
       --bg: #f8fafc;
@@ -350,10 +346,10 @@ app.get('/', (req, res) => {
       --base: #cbd5e1;
       --btn-bg: #e2e8f0;
       --btn-border: #cbd5e1;
-      --blue-ext: #0284c7;
-      --blue-ext-bg: rgba(2, 132, 199, 0.15);
       --flash-up: rgba(16, 185, 129, 0.7);
       --flash-down: rgba(239, 68, 68, 0.7);
+      --ext-color: #0284c7;
+      --ext-bg: rgba(2, 132, 199, 0.12);
     }
 
     * { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; font-feature-settings: "tnum" 1; }
@@ -364,7 +360,6 @@ app.get('/', (req, res) => {
     h1 { font-size: 1.1rem; font-weight: 800; letter-spacing: 0.5px; }
     .status { font-size: 0.72rem; color: #00c805; display: flex; align-items: center; gap: 5px; font-weight: 700; }
     .dot { width: 7px; height: 7px; background: #00c805; border-radius: 50%; box-shadow: 0 0 6px #00c805; }
-    .live-age { color: var(--text-sub); font-weight: 500; font-size: 0.68rem; margin-left: 2px; }
 
     .header-actions { display: flex; align-items: center; gap: 6px; }
     .action-btn, select.theme-select {
@@ -376,7 +371,7 @@ app.get('/', (req, res) => {
     .watchlist { margin-top: 8px; }
     .watchlist.card-view {
       display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
+      grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
       gap: 10px;
     }
     .watchlist.list-view {
@@ -400,14 +395,13 @@ app.get('/', (req, res) => {
       align-items: center;
       gap: 8px;
       margin-bottom: 6px;
-      flex-wrap: nowrap;
     }
     .topbar-left {
       display: flex;
       align-items: center;
       gap: 6px;
       min-width: 0;
-      flex-shrink: 1;
+      flex-wrap: nowrap;
     }
     .topbar-right {
       display: flex;
@@ -425,8 +419,6 @@ app.get('/', (req, res) => {
     .btn-ctrl:active { background: #00c805; color: #000; }
 
     .sym { font-size: 0.95rem; font-weight: 800; white-space: nowrap; }
-
-    /* Original regular price */
     .price-val {
       font-size: 1.12rem;
       font-weight: 800;
@@ -435,37 +427,35 @@ app.get('/', (req, res) => {
       white-space: nowrap;
       display: inline-block;
     }
+
+    /* Off-Market / Extended Hours Styling */
+    .ext-badge {
+      display: inline-flex;
+      align-items: baseline;
+      gap: 3px;
+      background: var(--ext-bg);
+      border: 1px solid var(--ext-color);
+      border-radius: 4px;
+      padding: 1px 5px;
+      color: var(--ext-color);
+      font-size: 0.88rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+    .ext-tag {
+      font-size: 0.58rem;
+      font-weight: 900;
+      opacity: 0.85;
+      letter-spacing: 0.3px;
+    }
+
     .badge {
       font-size: 0.75rem;
       font-weight: 800;
-      padding: 2px 5px;
+      padding: 2px 6px;
       border-radius: 4px;
       white-space: nowrap;
     }
-
-    /* Off-market blue price style (No labels) */
-    .ext-block {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-left: 2px;
-    }
-    .ext-price-val {
-      color: var(--blue-ext);
-      font-size: 0.95rem;
-      font-weight: 800;
-      white-space: nowrap;
-    }
-    .ext-badge {
-      background: var(--blue-ext-bg);
-      color: var(--blue-ext);
-      font-size: 0.68rem;
-      font-weight: 800;
-      padding: 1px 4px;
-      border-radius: 4px;
-      white-space: nowrap;
-    }
-
     .sub {
       font-size: 0.68rem;
       color: var(--text-sub);
@@ -506,7 +496,6 @@ app.get('/', (req, res) => {
     .flash-up { animation: flashGreen 1.4s ease-out; }
     .flash-down { animation: flashRed 1.4s ease-out; }
 
-    /* Chart Canvas strictly regular session */
     .chart-box {
       width: 100%;
       background: var(--chart-bg);
@@ -522,7 +511,6 @@ app.get('/', (req, res) => {
     .grid-line { stroke: var(--grid); stroke-width: 1; }
     .base-line { stroke: var(--base); stroke-dasharray: 3,3; stroke-width: 1.2; }
     .day-divider { stroke: var(--grid); stroke-width: 1; stroke-dasharray: 2,2; }
-
     .chart-line { fill: none; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
     .chart-area { stroke: none; opacity: 0.12; }
     .day-dot { stroke: var(--chart-bg); stroke-width: 1.2; }
@@ -561,9 +549,7 @@ app.get('/', (req, res) => {
   <header>
     <div class="header-left">
       <h1>RATIOS & STOCKS</h1>
-      <div class="status">
-        <div class="dot"></div> LIVE <span id="liveAge" class="live-age"></span>
-      </div>
+      <div class="status"><div class="dot"></div> LIVE</div>
     </div>
     <div class="header-actions">
       <button class="action-btn" id="viewToggleBtn" onclick="toggleViewMode()">⊞ Cards</button>
@@ -586,14 +572,6 @@ app.get('/', (req, res) => {
     let latestData = {};
     let openWeekDrawers = JSON.parse(localStorage.getItem('open_drawers') || '{}');
     let allWeekOpen = false;
-    let lastDataTime = Date.now();
-
-    // Timer indicating how many seconds ago data refreshed
-    setInterval(() => {
-      const sec = Math.round((Date.now() - lastDataTime) / 1000);
-      const el = document.getElementById('liveAge');
-      if (el) el.textContent = '• ' + sec + 's ago';
-    }, 1000);
 
     let currentView = localStorage.getItem('rw_view') || 'card';
     applyViewMode(currentView);
@@ -645,8 +623,7 @@ app.get('/', (req, res) => {
       const max = Math.max(...vals);
       const range = max === min ? 1 : max - min;
 
-      // Regular cash session span: 6.5 hours (23400s)
-      const sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
+      let sessionDuration = (sEnd && sStart && sEnd > sStart) ? (sEnd - sStart) : 23400;
 
       const pts = series.map((s, i) => {
         let xFrac;
@@ -863,20 +840,19 @@ app.get('/', (req, res) => {
         const weekBadge = weekPos ? 'up-bg' : 'down-bg';
         const weekSign = weekPos ? '+' : '';
 
-        const priceStr = item.price >= 1000 ? item.price.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
-                         item.price >= 10 ? item.price.toFixed(2) : item.price.toFixed(4);
+        const formatNumber = num => num >= 1000 ? num.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
+                                    num >= 10 ? num.toFixed(2) : num.toFixed(4);
 
-        // Off-market price in blue (No labels)
+        const priceStr = formatNumber(item.price);
+
+        // Extended hours markup
         let extHtml = '';
-        if (item.extPrice && Math.abs(item.extPrice - item.price) > 0.0001) {
-          const extStr = item.extPrice >= 1000 ? item.extPrice.toLocaleString('en-US', { maximumFractionDigits: 1 }) :
-                         item.extPrice >= 10 ? item.extPrice.toFixed(2) : item.extPrice.toFixed(4);
-          const extSign = item.extChangePct >= 0 ? '+' : '';
+        if (item.extPrice !== null && item.extPrice !== undefined) {
           extHtml = \`
-            <div class="ext-block">
-              <span class="ext-price-val">\${extStr}</span>
-              <span class="ext-badge">\${extSign}\${item.extChangePct.toFixed(2)}%</span>
-            </div>
+            <span class="ext-badge" title="Extended Hours (\${item.extType})">
+              \${formatNumber(item.extPrice)}
+              <span class="ext-tag">\${item.extType}</span>
+            </span>
           \`;
         }
 
@@ -906,8 +882,8 @@ app.get('/', (req, res) => {
                 </div>
                 <span class="sym">\${item.name}</span>
                 <span class="price-val \${flashClass}">\${priceStr}</span>
-                <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
                 \${extHtml}
+                <span class="badge \${dayBadge}">\${daySign}\${item.dailyChangePct.toFixed(2)}%</span>
                 <span class="sub">\${item.sub}</span>
               </div>
               <div class="topbar-right">
@@ -941,12 +917,10 @@ app.get('/', (req, res) => {
 
     async function poll() {
       try {
-        // Cache-busting timestamp prevents Android Chrome disk cache
-        const res = await fetch('/api/data?_=' + Date.now(), { cache: 'no-store' });
+        const res = await fetch('/api/data');
         const json = await res.json();
         if (json.items && json.items.length) {
           json.items.forEach(i => latestData[i.id] = i);
-          lastDataTime = Date.now();
           renderList();
         }
       } catch (e) {
@@ -955,7 +929,7 @@ app.get('/', (req, res) => {
     }
 
     poll();
-    setInterval(poll, 2000);
+    setInterval(poll, 1500);
   </script>
 </body>
 </html>`);
